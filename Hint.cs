@@ -35,14 +35,45 @@ namespace WindowSwitch {
             return new Rectangle(x, y, width, height);
         }
     }
+    // Small settings gear in the preview's top-right corner; it opens the Window Switch window.
+    sealed class OverlayGear : Control {
+        bool hover; static string iconFont;
+        public OverlayGear() {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand; TabStop = false; AccessibleName = "设置"; AccessibleRole = AccessibleRole.PushButton;
+        }
+        // The system icon font draws a crisp gear at any DPI (Windows 11: Segoe Fluent Icons, Windows 10: Segoe MDL2 Assets).
+        static string IconFont {
+            get {
+                if (iconFont == null) using (var fonts = new System.Drawing.Text.InstalledFontCollection()) iconFont = fonts.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
+                return iconFont;
+            }
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            var p = Theme.Current; var g = e.Graphics; g.Clear(p.OverlayBackground); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            if (hover) Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Hover, Height / 2);
+            using (var font = new Font(IconFont, 9.5f))
+                TextRenderer.DrawText(g, "", font, ClientRectangle, hover ? p.PrimaryText : p.MutedText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+    }
     public sealed class HintOverlay : UiForm {
         readonly AppList list = new AppList { Overlay = true, TabStop = false };
+        readonly OverlayGear gear = new OverlayGear();
         public bool NativeBackdrop { get; private set; }
         public AppList RowList { get { return list; } }
+        public event EventHandler SettingsRequested;
         public HintOverlay() {
             Text = "WindowSwitch.HintOverlay"; FormBorderStyle = FormBorderStyle.None; ControlBox = false; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-            Padding = new Padding(4, 12, 4, 12); Controls.Add(list); ClientSize = new Size(460, 136);
+            Padding = new Padding(4, 12, 4, 12); Controls.Add(list); Controls.Add(gear); gear.BringToFront(); ClientSize = new Size(460, 136);
+            gear.Click += delegate { if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty); };
             ResumeLayout(true); UpdateSurface();
+        }
+        // The gear sits in the top-right corner, above the first row's status pill (no extra height).
+        protected override void OnLayout(LayoutEventArgs e) {
+            base.OnLayout(e); int size = Dpi.Px(this, 20);
+            gear.SetBounds(ClientSize.Width - size - Dpi.Px(this, 6), Dpi.Px(this, 3), size, size); gear.BringToFront();
         }
         protected override bool ShowWithoutActivation { get { return true; } }
         // Form.TopMost's managed setter uses SetWindowPos without NOACTIVATE on .NET Framework.
@@ -88,6 +119,20 @@ namespace WindowSwitch {
         public HintMonitor(Func<HintOptions> setting, Func<List<HintRow>> content) {
             options = setting; rows = content; timer.Tick += delegate { Tick(); }; timer.Start();
         }
+        public event EventHandler SettingsRequested;
+        Point shownAt;
+        void EnsureOverlay() {
+            if (overlay != null) return;
+            overlay = new HintOverlay();
+            overlay.SettingsRequested += delegate {
+                Reason = OverlayDisplayReason.None; overlay.Hide(); state.Block();
+                if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty);
+            };
+        }
+        void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); overlay.Present(rows(), option); Reason = reason; shownAt = Cursor.Position; }
+        // Once the pointer has moved onto the visible preview (e.g. towards the gear), it stays until the pointer leaves,
+        // even after the hold key is released. A pointer that merely happened to be there when it appeared does not count.
+        bool PointerResting() { if (!Visible) return false; var at = Cursor.Position; return at != shownAt && overlay.Bounds.Contains(at); }
         public void Suspend(bool value) { suspended = value; state.Reset(); if (value) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         public void Interrupt() { state.Block(); if (Reason == OverlayDisplayReason.Hold) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         static bool Down(int key) { return (Native.GetAsyncKeyState(key) & 0x8000) != 0; }
@@ -97,7 +142,7 @@ namespace WindowSwitch {
             if (suspended) { state.Reset(); if (overlay != null) overlay.Hide(); return; }
             // Manual previews have a single renewable deadline and do not depend on the hold key.
             if (Reason == OverlayDisplayReason.ManualPreview || Reason == OverlayDisplayReason.TrayPreview) {
-                if (DateTime.UtcNow < manualUntil) return;
+                if (DateTime.UtcNow < manualUntil || PointerResting()) return;
                 Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); state.Reset();
             }
             if (!option.Enabled) { state.Reset(); if (overlay != null) overlay.Hide(); Reason = OverlayDisplayReason.None; return; }
@@ -111,14 +156,11 @@ namespace WindowSwitch {
             }
             bool show = state.Observe(held, other, Environment.TickCount, option.DelayMs);
             LastHeld = held; LastOther = other;
-            if (show && !Visible) { if (overlay == null) overlay = new HintOverlay(); overlay.Present(rows(), option); Reason = OverlayDisplayReason.Hold; }
-            else if (!show && Visible) { overlay.Hide(); Reason = OverlayDisplayReason.None; }
+            if (show && !Visible) Present(OverlayDisplayReason.Hold, option);
+            else if (!show && Visible && !PointerResting()) { overlay.Hide(); Reason = OverlayDisplayReason.None; }
         }
         public void ShowPreview() { ShowPreview(OverlayDisplayReason.ManualPreview); }
-        public void ShowPreview(OverlayDisplayReason reason) {
-            if (overlay == null) overlay = new HintOverlay();
-            manualUntil = DateTime.UtcNow.AddSeconds(5); Reason = reason; overlay.Present(rows(), options());
-        }
+        public void ShowPreview(OverlayDisplayReason reason) { manualUntil = DateTime.UtcNow.AddSeconds(5); Present(reason, options()); }
         public void Dispose() { timer.Dispose(); if (overlay != null) overlay.Dispose(); }
     }
     public sealed class HintEditor : SheetPanel {

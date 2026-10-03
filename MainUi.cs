@@ -10,6 +10,7 @@ namespace WindowSwitch {
         readonly Label hintCaption = Ui.Label("", true);
         GlobalShortcutSetting openApp, minimizeSetting;
         readonly SegmentedControl themeChoice = new SegmentedControl();
+        readonly Toggle trayToggle = new Toggle { AccessibleName = "显示托盘图标" };
         readonly SheetHost sheetHost = new SheetHost { Dock = DockStyle.Fill };
         Card settingsCard;
         SheetPanel sheet; int editorIndex = -1; AppRule editorRule; bool switching, widened; int widenedWidth, restoreWidth, restoreLeft;
@@ -48,6 +49,8 @@ namespace WindowSwitch {
             var appearance = SettingsPair("主题", themeChoice); appearance.Margin = new Padding(0, 4, 0, 12); Ui.Row(prefs, appearance);
             var launch = SettingsPair("随 Windows 登录启动", startup); launch.Margin = Padding.Empty; Ui.Row(prefs, launch);
             startup.Checked = IsStartupEnabled(); startup.CheckedChanged += delegate { if (!refreshing) ChangeStartup(startup.Checked); };
+            var trayPair = SettingsPair("显示托盘图标", trayToggle); trayPair.Margin = new Padding(0, 12, 0, 0); Ui.Row(prefs, trayPair);
+            trayToggle.Checked = settings.ShowTrayIcon; trayToggle.CheckedChanged += delegate { if (!refreshing) ChangeTrayIcon(trayToggle.Checked); };
             grid.Controls.Add(prefs, 1, 1); settingsCard.Controls.Add(grid); Ui.Row(root, settingsCard);
             // The status line only appears when there is something to report (a problem, mostly).
             note.Margin = new Padding(0, 12, 0, 0); note.Text = ""; note.Visible = false; note.TextChanged += delegate { note.Visible = note.Text.Length > 0; }; Ui.Row(root, note);
@@ -61,9 +64,14 @@ namespace WindowSwitch {
         }
         static Button AddButton(FlowLayoutPanel panel, string text, bool primary, EventHandler action) { var button = Ui.Button(text, primary); button.Click += action; panel.Controls.Add(button); return button; }
         void ChangeStartup(bool enable) { try { SetStartup(enable); } catch (Exception ex) { note.Text = "启动设置失败：" + ex.Message; } refreshing = true; startup.Checked = IsStartupEnabled(); refreshing = false; }
+        void ChangeTrayIcon(bool show) {
+            var proposed = CopySettings(); proposed.ShowTrayIcon = show;
+            if (SaveSettings(proposed)) tray.Visible = show;
+            refreshing = true; trayToggle.Checked = settings.ShowTrayIcon; refreshing = false;
+        }
         void ChangeTheme(ThemeMode mode) { var proposed = CopySettings(); proposed.Theme = mode; if (SaveSettings(proposed)) Theme.Set(mode); refreshing = true; themeChoice.SelectedIndex = (int)settings.Theme; refreshing = false; }
         void BuildTray() {
-            tray.Icon = Icon; tray.Text = "窗口切换 · Window Switch"; tray.Visible = true;
+            tray.Icon = Icon; tray.Text = "窗口切换 · Window Switch"; tray.Visible = settings.ShowTrayIcon;
             var menu = new ContextMenuStrip(); menu.Items.Add("打开 Window Switch", null, delegate { ShowSettings(); }); menu.Items.Add("快捷键预览", null, delegate { hints.ShowPreview(OverlayDisplayReason.TrayPreview); });
             menu.Items.Add(new ToolStripSeparator()); var launch = new ToolStripMenuItem("随 Windows 登录启动") { CheckOnClick = false }; launch.Click += delegate { ChangeStartup(!IsStartupEnabled()); }; menu.Items.Add(launch);
             var themes = new ToolStripMenuItem("主题"); string[] names = { "跟随系统", "亮色", "暗色" }; for (int i = 0; i < names.Length; i++) { int mode = i; var item = new ToolStripMenuItem(names[i]); item.Click += delegate { ChangeTheme((ThemeMode)mode); }; themes.DropDownItems.Add(item); } menu.Items.Add(themes);

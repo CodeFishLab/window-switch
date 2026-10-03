@@ -48,7 +48,9 @@ namespace WindowSwitch {
         public GlobalShortcut Minimize { get; set; }
         // Shows (or, when already in front, hides) the Window Switch window. Off until the user sets it.
         public GlobalShortcut OpenApp { get; set; }
-        public Settings() { Version = 2; Applications = new List<AppRule>(); Hint = new HintOptions(); Minimize = new GlobalShortcut(); OpenApp = new GlobalShortcut { Enabled = false }; }
+        // Without a tray icon the window is reopened with the open-window shortcut, the preview's gear, or by running the exe again.
+        public bool ShowTrayIcon { get; set; }
+        public Settings() { Version = 2; Applications = new List<AppRule>(); Hint = new HintOptions(); Minimize = new GlobalShortcut(); OpenApp = new GlobalShortcut { Enabled = false }; ShowTrayIcon = true; }
     }
     public class KeyChord {
         public uint Modifiers, Key;
@@ -282,6 +284,7 @@ namespace WindowSwitch {
             if (settings.OpenApp == null) settings.OpenApp = new GlobalShortcut { Enabled = false };
             Theme.Set(settings.Theme); BuildUi();
             hints = new HintMonitor(() => settings.Hint, delegate { return HintRows().Where(r => !r.Rule.HideInPreview).ToList(); });
+            hints.SettingsRequested += delegate { ShowSettings(); };
             endpoint = new Endpoint(endpointTitle); hotkeys = new HotkeyManager(endpoint.Handle);
             endpoint.Hotkey = delegate(int id) {
                 hints.Interrupt();
@@ -300,14 +303,15 @@ namespace WindowSwitch {
             };
             BuildTray();
             FormClosing += delegate(object sender, FormClosingEventArgs e) { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideToTray(); } };
-            Resize += delegate { if (WindowState == FormWindowState.Minimized && !exiting) HideToTray(); };
+            // With no tray icon, minimizing stays an ordinary taskbar minimize so the window cannot get lost.
+            Resize += delegate { if (WindowState == FormWindowState.Minimized && !exiting && settings.ShowTrayIcon) HideToTray(); };
             RegisterRules();
             retry.Tick += delegate { if (!paused && !editing && hotkeys.Retry(settings, paused)) { RefreshRows(); WriteStatus(); note.Text = ""; } }; retry.Start();
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         }
         void SystemThemeChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e) { if (!IsDisposed && endpoint != null) Native.PostMessage(endpoint.Handle, 0x8006, IntPtr.Zero, IntPtr.Zero); }
         void UpdateRules(AppRule rule, int index) { var copy = new List<AppRule>(settings.Applications); if (index < 0) copy.Add(rule); else copy[index] = rule; SaveRules(copy); }
-        Settings CopySettings() { return new Settings { Applications = settings.Applications, Hint = settings.Hint, Theme = settings.Theme, Minimize = settings.Minimize, OpenApp = settings.OpenApp }; }
+        Settings CopySettings() { return new Settings { Applications = settings.Applications, Hint = settings.Hint, Theme = settings.Theme, Minimize = settings.Minimize, OpenApp = settings.OpenApp, ShowTrayIcon = settings.ShowTrayIcon }; }
         void SaveRules(List<AppRule> rules) { var proposed = CopySettings(); proposed.Applications = rules; SaveSettings(proposed); }
         bool SaveSettings(Settings proposed) {
             try {
