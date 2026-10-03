@@ -1,0 +1,20 @@
+# Personal configuration and runtime state (created next to the exe)
+config.json
+config.json.bak
+config.json.tmp
+status.json
+error.log
+
+# Build output
+*.exe
+*.pdb
+bin/
+obj/
+
+# Local screenshots and old working notes
+previews/
+使用说明.md
+验收说明.md
+
+# Crash dumps
+*.stackdump
