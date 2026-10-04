@@ -2,6 +2,7 @@
 config.json
 config.json.bak
 config.json.tmp
+config.json.*
 status.json
 error.log
 

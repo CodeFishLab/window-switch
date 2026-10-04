@@ -51,8 +51,10 @@ namespace WindowSwitch {
         public ShortcutRecorder() { Cursor = Cursors.Hand; Font = new Font("Consolas", 10.5f); AccessibleName = "快捷键录制"; Size = new Size(180, 34); AutoSize = true; TabStop = true; SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true); }
         public override Size GetPreferredSize(Size proposedSize) { return new Size(Dpi.Px(this, 180), Math.Max(Dpi.Px(this, Dpi.FieldHeight), Font.Height + Dpi.Px(this, 10))); }
         protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
-        protected override void OnEnter(EventArgs e) { before = Text; beforeKey = KeyCode; cue = true; if (RecordingStarted != null) RecordingStarted(this, e); Invalidate(); base.OnEnter(e); }
-        protected override void OnLeave(EventArgs e) { cue = false; if (RecordingEnded != null) RecordingEnded(this, e); Invalidate(); base.OnLeave(e); }
+        // Any recorder starting or stopping (the main window pauses its shortcuts while one records).
+        public static event Action<ShortcutRecorder, bool> AnyRecording;
+        protected override void OnEnter(EventArgs e) { before = Text; beforeKey = KeyCode; cue = true; if (RecordingStarted != null) RecordingStarted(this, e); if (AnyRecording != null) AnyRecording(this, true); Invalidate(); base.OnEnter(e); }
+        protected override void OnLeave(EventArgs e) { cue = false; if (RecordingEnded != null) RecordingEnded(this, e); if (AnyRecording != null) AnyRecording(this, false); Invalidate(); base.OnLeave(e); }
         protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
         protected override void OnPaint(PaintEventArgs e) {
             var p = Theme.Current; e.Graphics.Clear(Parent.BackColor);
@@ -142,6 +144,8 @@ namespace WindowSwitch {
         // The preview reads as a table: names in one column, the status pill close to the right edge, and each app's key
         // centred in the space between them (one shared centre line for every row).
         const int OverlayNameMax = 160, OverlayColumnGap = 20, OverlayEdge = 10;
+        // With numpad opening on, a narrow number column sits left of the icons (the icons move right to make room).
+        const int OverlayNumberedLead = 30;
         static List<string> Keys(HintRow row, bool overlay) {
             return (row.Shortcuts ?? new List<string> { row.Shortcut ?? "" }).Take(overlay ? 1 : int.MaxValue).Select(k => KeyChord.Pretty(k))
                 .Select(k => overlay && row.Rule != null && row.Rule.HideSidesInPreview ? KeyText.WithoutSides(k) : k).ToList();
@@ -160,12 +164,19 @@ namespace WindowSwitch {
                     foreach (string k in Keys(row, true)) keys = Math.Max(keys, KeyText.Width(g, k, mono, scale) + (int)(22 * scale));
                     pill = Math.Max(pill, TextRenderer.MeasureText(g, ShortState(row.State), small).Width + (int)(26 * scale));
                 }
-            return (int)((16 + 32 + 12 + OverlayColumnGap + 12 + OverlayEdge) * scale) + OverlayNameColumn(g, rows, font, scale) + keys + pill;
+            int lead = rows.Any(r => r.Number > 0) ? OverlayNumberedLead : 16;
+            // Keys sit centred on the card, so each half must hold half the widest key plus whatever is on that side.
+            int left = (int)((lead + 32 + 12 + OverlayColumnGap) * scale) + OverlayNameColumn(g, rows, font, scale), right = (int)((12 + OverlayEdge) * scale) + pill;
+            return Math.Max(left + keys + right, 2 * Math.Max(left, right) + keys);
         }
-        public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0) {
+        public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0, bool numbered = false, bool highlighted = false) {
             var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias; var zones = new RowZones();
-            int pad = (int)(16 * scale), iconSize = (int)(32 * scale), gap = (int)(12 * scale);
-            var iconRect = new Rectangle(bounds.X + pad, bounds.Y + (bounds.Height - iconSize) / 2, iconSize, iconSize);
+            int pad = (int)(16 * scale), iconSize = (int)(32 * scale), gap = (int)(12 * scale), lead = overlay && numbered ? (int)(OverlayNumberedLead * scale) : pad;
+            var iconRect = new Rectangle(bounds.X + lead, bounds.Y + (bounds.Height - iconSize) / 2, iconSize, iconSize);
+            if (overlay && numbered && row.Number > 0)
+                using (var digit = new Font("Consolas", font.Size * .95f))
+                    TextRenderer.DrawText(g, row.Number.ToString(), digit, new Rectangle(bounds.X, bounds.Y, iconRect.Left - bounds.X - (int)(4 * scale), bounds.Height),
+                        highlighted ? p.PrimaryText : p.MutedText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             string state = ShortState(row.State); bool success = state == "已生效";
             using (var small = Small(font)) using (var mono = Mono(font, overlay)) {
                 int statusW = TextRenderer.MeasureText(g, state, small).Width + (int)(26 * scale);
@@ -265,26 +276,31 @@ namespace WindowSwitch {
         public void SetRows(List<HintRow> rows) { Rows = rows; selected = Math.Min(selected, rows.Count - 1); if (highlight >= rows.Count) highlight = -1; offset = Math.Min(offset, MaximumOffset); Invalidate(); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); offset = Math.Min(offset, MaximumOffset); }
         protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(Overlay ? Theme.Current.OverlayBackground : Theme.Current.Surface); }
-        protected override void OnPaint(PaintEventArgs e) {
-            base.OnPaint(e); var p = Theme.Current; float scale = DeviceDpi / 96f; int width = ClientSize.Width - (Scrollable ? (int)(10 * scale) : 0);
-            if (Rows.Count == 0 && !Overlay) TextRenderer.DrawText(e.Graphics, "还没有应用", Font, ClientRectangle, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            int nameColumn = Overlay ? RowPainter.OverlayNameColumn(e.Graphics, Rows, Font, scale) : 0;
+        protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); Render(e.Graphics, e.ClipRectangle, true); }
+        // Paints the part of the list under clip (list coordinates) into another control's Graphics, translated by the
+        // caller: the overlay's gear sits on top of the first row and shows the row (and its highlight) through.
+        public void RenderBehind(Graphics g, Rectangle clip) { using (var b = new SolidBrush(Overlay ? Theme.Current.OverlayBackground : Theme.Current.Surface)) g.FillRectangle(b, clip); Render(g, clip, false); }
+        void Render(Graphics g, Rectangle clip, bool record) {
+            var p = Theme.Current; float scale = DeviceDpi / 96f; int width = ClientSize.Width - (Scrollable ? (int)(10 * scale) : 0);
+            if (Rows.Count == 0 && !Overlay) TextRenderer.DrawText(g, "还没有应用", Font, ClientRectangle, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            int nameColumn = Overlay ? RowPainter.OverlayNameColumn(g, Rows, Font, scale) : 0; bool numbered = Overlay && Rows.Any(r => r.Number > 0);
             for (int i = 0; i < Rows.Count; i++) {
-                var rect = new Rectangle(0, -offset + i * RowHeight, width, RowHeight); if (!rect.IntersectsWith(e.ClipRectangle)) continue;
+                var rect = new Rectangle(0, -offset + i * RowHeight, width, RowHeight); if (!rect.IntersectsWith(clip)) continue;
                 bool lifted = reordering && i == reorderAt; var plate = Rectangle.Inflate(rect, -(int)(4 * scale), -(int)(3 * scale));
-                if (Overlay && i == highlight) Theme.Fill(e.Graphics, plate, p.Selection, (int)(Theme.SmallRadius * scale));
-                if (!Overlay && (i == selected || i == hovered || lifted)) Theme.Fill(e.Graphics, plate, lifted || i == selected ? p.Selection : p.Hover, (int)(Theme.SmallRadius * scale));
-                if (lifted) using (var pen = new Pen(p.Focus)) using (var path = Theme.Round(new RectangleF(plate.X + .5f, plate.Y + .5f, plate.Width - 1, plate.Height - 1), (int)(Theme.SmallRadius * scale))) e.Graphics.DrawPath(pen, path);
-                zones[i] = RowPainter.Draw(e.Graphics, rect, Rows[i], Font, scale, Overlay, i == hovered && !reordering && i != quietIndex ? hoverPart : RowHover.None, nameColumn);
+                if (Overlay && i == highlight) Theme.Fill(g, plate, p.Selection, (int)(Theme.SmallRadius * scale));
+                if (!Overlay && (i == selected || i == hovered || lifted)) Theme.Fill(g, plate, lifted || i == selected ? p.Selection : p.Hover, (int)(Theme.SmallRadius * scale));
+                if (lifted) using (var pen = new Pen(p.Focus)) using (var path = Theme.Round(new RectangleF(plate.X + .5f, plate.Y + .5f, plate.Width - 1, plate.Height - 1), (int)(Theme.SmallRadius * scale))) g.DrawPath(pen, path);
+                var zone = RowPainter.Draw(g, rect, Rows[i], Font, scale, Overlay, i == hovered && !reordering && i != quietIndex ? hoverPart : RowHover.None, nameColumn, numbered, i == highlight);
+                if (record) zones[i] = zone;
                 // A faint grip on the hovered (or lifted) row hints that rows can be dragged.
                 if (!Overlay && Rows.Count > 1 && (lifted || (!reordering && i == hovered))) {
                     float step = 4.5f * scale, r = 1.3f * scale, cx = 8 * scale, cy = rect.Y + rect.Height / 2f;
                     using (var brush = new SolidBrush(lifted ? p.SecondaryText : p.MutedText))
-                        for (int row = -1; row <= 1; row++) for (int col = 0; col < 2; col++) e.Graphics.FillEllipse(brush, cx + (col - .5f) * step - r, cy + row * step - r, r * 2, r * 2);
+                        for (int row = -1; row <= 1; row++) for (int col = 0; col < 2; col++) g.FillEllipse(brush, cx + (col - .5f) * step - r, cy + row * step - r, r * 2, r * 2);
                 }
-                if (i < Rows.Count - 1) using (var pen = new Pen(Overlay ? Theme.Current.OverlayBorder : p.Divider)) e.Graphics.DrawLine(pen, (int)(16 * scale), rect.Bottom - 1, width - (int)((Overlay ? 10 : 16) * scale), rect.Bottom - 1);
+                if (i < Rows.Count - 1) using (var pen = new Pen(Overlay ? Theme.Current.OverlayBorder : p.Divider)) g.DrawLine(pen, (int)(16 * scale), rect.Bottom - 1, width - (int)((Overlay ? 10 : 16) * scale), rect.Bottom - 1);
             }
-            if (Scrollable) { int thumbH = Math.Max((int)(24 * scale), ClientSize.Height * ClientSize.Height / (Rows.Count * RowHeight)); int y = offset * Math.Max(1, ClientSize.Height - thumbH) / Math.Max(1, MaximumOffset); Theme.Fill(e.Graphics, new Rectangle(ClientSize.Width - (int)(6 * scale), y, Math.Max(3, (int)(3 * scale)), thumbH), p.Border, (int)(3 * scale)); }
+            if (Scrollable) { int thumbH = Math.Max((int)(24 * scale), ClientSize.Height * ClientSize.Height / (Rows.Count * RowHeight)); int y = offset * Math.Max(1, ClientSize.Height - thumbH) / Math.Max(1, MaximumOffset); Theme.Fill(g, new Rectangle(ClientSize.Width - (int)(6 * scale), y, Math.Max(3, (int)(3 * scale)), thumbH), p.Border, (int)(3 * scale)); }
         }
         protected override void OnMouseDown(MouseEventArgs e) {
             if (Scrollable && e.X >= Width - 12 * DeviceDpi / 96f) { dragging = true; dragY = e.Y; dragOffset = offset; Capture = true; }

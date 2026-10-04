@@ -202,9 +202,21 @@ namespace WindowSwitch {
         }
         protected abstract void Save();
         public abstract void FocusFirst();
+        // Writes the sheet's values (set by the owner); false when they could not be stored.
+        public Func<bool> Committing;
+        bool committed;
+        // Saves as if 保存 were clicked; false when validation or storing failed (the sheet then shows why).
+        public bool TrySave() { committed = false; Save(); return committed; }
+        // Whether the form differs from what it was opened with.
+        public virtual bool HasChanges { get { return false; } }
+        // Brief confirmation on the button after the sheet was saved and reopened.
+        public void FlashSaved() {
+            SaveButton.Text = "已保存"; var timer = new System.Windows.Forms.Timer { Interval = 1400 };
+            timer.Tick += delegate { timer.Stop(); timer.Dispose(); if (!SaveButton.IsDisposed) SaveButton.Text = "保存"; }; timer.Start();
+        }
         // Esc first closes inner views (e.g. the app picker); returns false when the sheet itself should close.
         public virtual bool HandleEscape() { return false; }
-        protected void RaiseSaved() { if (Saved != null) Saved(this, EventArgs.Empty); }
+        protected void RaiseSaved() { committed = Committing == null || Committing(); if (committed && Saved != null) Saved(this, EventArgs.Empty); }
         void RaiseCancelled() { if (Cancelled != null) Cancelled(this, EventArgs.Empty); }
         // Composited painting keeps the sheet from flickering while it slides.
         protected override CreateParams CreateParams { get { var value = base.CreateParams; value.ExStyle |= 0x02000000; return value; } }
@@ -290,6 +302,8 @@ namespace WindowSwitch {
         readonly Toggle enabled = new Toggle { Checked = true, AccessibleName = "启用这个快捷键" };
         readonly Toggle inPreview = new Toggle { Checked = true, AccessibleName = "显示预览" };
         readonly Toggle previewSides = new Toggle { Checked = true, AccessibleName = "预览显示 Left / Right" };
+        // 随鼠标换屏 for this app: follow the main switch, or always / never.
+        readonly SegmentedControl screenMode = new SegmentedControl { AccessibleName = "随鼠标换屏" };
         readonly Disclosure disclosure = new Disclosure { Text = "高级设置" };
         readonly TableLayoutPanel advanced = Ui.Table(2);
         Label error { get { return Error; } }
@@ -300,6 +314,14 @@ namespace WindowSwitch {
         readonly SynchronizationContext ui;
         public AppRule Rule;
         public Func<AppRule, string> ValidateRule;
+        // What the form showed when it opened; browser-profile details that load later are left out on purpose.
+        string initial;
+        string Snapshot() {
+            var keys = string.Join("|", recorders.Select(r => r.Text.Trim()).Where(t => t.Length > 0));
+            return string.Join("", new[] { name.Text.Trim(), process.Text.Trim(), executable.Text.Trim(), arguments.Text, title.Text.Trim(), userData.Text.Trim(), keys,
+                enabled.Checked.ToString(), inPreview.Checked.ToString(), previewSides.Checked.ToString(), screenMode.SelectedIndex.ToString(), target.TargetType.ToString(), target.ProfileDirectory ?? "", target.WindowAppId ?? "" });
+        }
+        public override bool HasChanges { get { return initial != null && Snapshot() != initial; } }
         // 移除 asks for a second click before it fires.
         public event EventHandler RemoveRequested;
         public RuleEditor(AppRule existing) : base(existing == null ? "添加应用" : "编辑应用", null) {
@@ -339,6 +361,12 @@ namespace WindowSwitch {
             Ui.Row(Content, Ui.ToggleRow("启用这个快捷键", enabled));
             Ui.Row(Content, Ui.ToggleRow("显示预览", inPreview));
             var sidesRow = Ui.ToggleRow("预览显示 Left / Right", previewSides); Ui.Row(Content, sidesRow);
+            screenMode.Items.AddRange(new[] { "跟随总开关", "总是", "从不" }); screenMode.SelectedIndex = 0;
+            var screenRow = Ui.Table(2); screenRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); screenRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            screenRow.RowStyles.Add(new RowStyle(SizeType.AutoSize)); screenRow.RowCount = 1; screenRow.Margin = new Padding(0, 0, 0, 12);
+            var screenLabel = Ui.Label("随鼠标换屏"); screenLabel.Dock = DockStyle.None; screenLabel.Anchor = AnchorStyles.Left; screenLabel.Margin = Padding.Empty;
+            screenMode.Dock = DockStyle.None; screenMode.Anchor = AnchorStyles.Right; screenMode.Margin = Padding.Empty;
+            screenRow.Controls.Add(screenLabel, 0, 0); screenRow.Controls.Add(screenMode, 1, 0); Ui.Row(Content, screenRow);
             inPreview.CheckedChanged += delegate { sidesRow.Visible = inPreview.Checked; };
 
             disclosure.Dock = DockStyle.None; disclosure.Anchor = AnchorStyles.Left; disclosure.Margin = Padding.Empty; Ui.Row(Content, disclosure);
@@ -353,10 +381,11 @@ namespace WindowSwitch {
             disclosure.ExpandedChanged += delegate { advanced.Visible = disclosure.Expanded; if (disclosure.Expanded) Body.RevealLater(advanced); };
 
             if (existing != null) {
-                target = Clone(existing); name.Text = existing.Name; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview; previewSides.Checked = !existing.HideSidesInPreview;
+                target = Clone(existing); name.Text = existing.Name; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview; previewSides.Checked = !existing.HideSidesInPreview; screenMode.SelectedIndex = existing.ScreenMode >= 0 && existing.ScreenMode <= 2 ? existing.ScreenMode : 0;
                 hasTarget = true; targetTitle = TargetTitle(existing); LoadProfiles(existing.ProfileDirectory);
             }
             if (recorders.Count == 0) AddShortcutRow("");
+            initial = Snapshot();
             UpdateCard();
         }
         // Rows added after the sheet was DPI-scaled must be scaled the same way.
@@ -510,7 +539,7 @@ namespace WindowSwitch {
                 var seen = new HashSet<string>(); foreach (string key in keys) if (!seen.Add(KeyChord.Parse(key).Id)) throw new ArgumentException("同一个快捷键填写了两次：" + KeyChord.Pretty(key));
                 var selectedProfile = profileChoice.SelectedValue as BrowserProfile;
                 if (target.TargetType == TargetType.Profile && selectedProfile != null && !selectedProfile.UserData.Equals(userData.Text.Trim(), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("数据目录已改变，请点击高级设置里的“重新识别用户”。");
-                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked; proposed.HideSidesInPreview = !previewSides.Checked;
+                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked; proposed.HideSidesInPreview = !previewSides.Checked; proposed.ScreenMode = screenMode.SelectedIndex;
                 if (ValidateRule != null) { string message = ValidateRule(proposed); if (message != null) throw new ArgumentException(message); }
                 Rule = proposed; RaiseSaved();
             } catch (Exception ex) { error.Text = ex.Message; }

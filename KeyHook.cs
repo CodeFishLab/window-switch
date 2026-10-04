@@ -13,7 +13,23 @@ namespace WindowSwitch {
         // While the hold preview is up, ↑ ↓ Enter Esc steer it instead of reaching the active app (posted with the key).
         public const int NavigateMessage = 0x800A;
         public volatile bool Navigating;
+        // The hold key (e.g. Left Alt) when numpad opening is on, else 0: while it is down, numpad 1–9 are posted as
+        // VK_NUMPAD1–9 (NavigateMessage) and kept from the active app (no Alt-code characters).
+        public volatile int NumberHoldKey;
         public const ushort MaskVirtualKey = MaskKey;
+        // Esc shortly after a switch (while that window is still in front) is posted as UndoMessage with the window
+        // instead of reaching it. ms < 0 means no time limit. Armed by each switch; disarmed when used, when it expires,
+        // by a minimize, or as soon as another window comes to the front (leaving and coming back does not re-arm).
+        public const int UndoMessage = 0x800B;
+        volatile IntPtr undoWindow; volatile int undoAt, undoMs;
+        public void ArmUndo(IntPtr hwnd, int ms) { undoAt = Environment.TickCount; undoMs = ms; undoWindow = ms != 0 ? hwnd : IntPtr.Zero; }
+        delegate void WinEventProc(IntPtr hook, uint e, IntPtr hwnd, int obj, int child, uint thread, uint time);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventProc proc, uint process, uint thread, uint flags);
+        [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+        readonly WinEventProc foregroundProc;
+        void ForegroundChanged(IntPtr hook, uint e, IntPtr hwnd, int obj, int child, uint thread, uint time) {
+            var armed = undoWindow; if (armed != IntPtr.Zero && hwnd != IntPtr.Zero && !WindowIdentity.SameForeground(armed, hwnd)) undoWindow = IntPtr.Zero;
+        }
         public struct Binding { public int Id; public KeyChord Chord; }
         delegate IntPtr HookProc(int code, IntPtr wparam, IntPtr lparam);
         [StructLayout(LayoutKind.Sequential)] struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
@@ -40,13 +56,16 @@ namespace WindowSwitch {
         public bool Installed { get { return hook != IntPtr.Zero; } }
 
         public SidedHotkeys(IntPtr endpoint) {
-            target = endpoint; proc = Callback;
+            target = endpoint; proc = Callback; foregroundProc = ForegroundChanged;
             var ready = new ManualResetEvent(false);
             var thread = new Thread(delegate() {
                 threadId = GetCurrentThreadId();
                 hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0); // WH_KEYBOARD_LL
+                // EVENT_SYSTEM_FOREGROUND, delivered to this thread's message loop (WINEVENT_OUTOFCONTEXT).
+                IntPtr foreground = SetWinEventHook(0x0003, 0x0003, IntPtr.Zero, foregroundProc, 0, 0, 0);
                 ready.Set();
                 MSG msg; while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+                if (foreground != IntPtr.Zero) UnhookWinEvent(foreground);
                 if (hook != IntPtr.Zero) UnhookWindowsHookEx(hook); hook = IntPtr.Zero;
             });
             thread.IsBackground = true; thread.Name = "WindowSwitch.KeyHook"; thread.Start();
@@ -65,10 +84,22 @@ namespace WindowSwitch {
                     // never reaches that state.) This holds even when other keyboard tools re-send or reorder events,
                     // where pairing our key-down with "its" key-up does not.
                     bool repeat = down && Down((int)info.vkCode);
+                    int digit = NumberHoldKey != 0 ? NumpadDigit(info.vkCode, info.flags) : 0;
+                    if (down && digit > 0 && Down(NumberHoldKey)) {
+                        if (!repeat) { Mask(); Native.PostMessage(target, NavigateMessage, new IntPtr(0x60 + digit), IntPtr.Zero); }
+                        swallowed.Add(info.vkCode); return new IntPtr(1);
+                    }
                     if (down && Navigating && IsNavigation(info.vkCode)) {
                         if (!repeat) Mask(); swallowed.Add(info.vkCode);
                         Native.PostMessage(target, NavigateMessage, new IntPtr((int)info.vkCode), IntPtr.Zero);
                         return new IntPtr(1);
+                    }
+                    var armed = undoWindow;
+                    if (down && !repeat && info.vkCode == 0x1B && armed != IntPtr.Zero) {
+                        undoWindow = IntPtr.Zero;
+                        if ((undoMs < 0 || unchecked(Environment.TickCount - undoAt) <= undoMs) && WindowIdentity.SameForeground(armed, Native.GetForegroundWindow())) {
+                            swallowed.Add(0x1B); Native.PostMessage(target, UndoMessage, armed, IntPtr.Zero); return new IntPtr(1);
+                        }
                     }
                     if (repeat && swallowed.Contains(info.vkCode)) return new IntPtr(1);
                     if (down && !repeat) swallowed.Remove(info.vkCode);
@@ -84,6 +115,14 @@ namespace WindowSwitch {
                 }
             }
             return CallNextHookEx(hook, code, wparam, lparam);
+        }
+        // Numpad 1–9 as a digit: VK_NUMPAD1–9 with NumLock on; with it off they arrive as End/↓/PgDn/←/Clear/→/Home/↑/PgUp
+        // without the "extended" flag (the dedicated navigation keys carry it).
+        public static int NumpadDigit(uint vk, uint flags) {
+            if (vk >= 0x61 && vk <= 0x69) return (int)vk - 0x60;
+            if ((flags & 1) != 0) return 0;
+            switch (vk) { case 0x23: return 1; case 0x28: return 2; case 0x22: return 3; case 0x25: return 4; case 0x0C: return 5; case 0x27: return 6; case 0x24: return 7; case 0x26: return 8; case 0x21: return 9; }
+            return 0;
         }
         public static bool IsNavigation(uint vk) { return vk == 0x26 || vk == 0x28 || vk == 0x0D || vk == 0x1B; }
         static bool IsModifier(uint vk) { return (vk >= 0xA0 && vk <= 0xA5) || vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C; }

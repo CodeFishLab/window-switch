@@ -24,10 +24,11 @@ namespace WindowSwitch {
         public int AppCount { get { return registered.Count; } }
         readonly SidedHotkeys sided;
         public bool Navigating { set { sided.Navigating = value; } }
+        public void ArmUndo(IntPtr hwnd, int ms) { sided.ArmUndo(hwnd, ms); }
         public HotkeyManager(IntPtr hwnd) { handle = hwnd; sided = new SidedHotkeys(hwnd); }
         public AppRule Rule(int id) { AppRule rule; return registered.TryGetValue(id, out rule) ? rule : null; }
         public string State(AppRule rule) { string value; return states.TryGetValue(rule, out value) ? value : "未注册"; }
-        public void Clear() { foreach (int id in registered.Keys) Native.UnregisterHotKey(handle, id); registered.Clear(); Native.UnregisterHotKey(handle, MinimizeId); Native.UnregisterHotKey(handle, OpenAppId); sided.Set(new SidedHotkeys.Binding[0]); }
+        public void Clear() { foreach (int id in registered.Keys) Native.UnregisterHotKey(handle, id); registered.Clear(); Native.UnregisterHotKey(handle, MinimizeId); Native.UnregisterHotKey(handle, OpenAppId); sided.Set(new SidedHotkeys.Binding[0]); sided.NumberHoldKey = 0; }
         public void Apply(Settings settings, bool paused) {
             Clear(); states.Clear(); var hooked = new List<SidedHotkeys.Binding>();
             for (int i = 0; i < settings.Applications.Count; i++) {
@@ -42,6 +43,7 @@ namespace WindowSwitch {
                 }
                 states[rule] = failure ?? "已生效";
             }
+            var hint = settings.Hint; sided.NumberHoldKey = !paused && hint != null && hint.Enabled && hint.NumberKeys ? hint.Key : 0;
             MinimizeState = RegisterGlobal(settings.Minimize, MinimizeId, hooked, paused);
             OpenAppState = RegisterGlobal(settings.OpenApp, OpenAppId, hooked, paused);
             sided.Set(hooked);
