@@ -200,7 +200,10 @@ namespace WindowSwitch {
         // yet; a quick second press must still minimize it rather than "activate" it again.
         string recentId; IntPtr recentWindow; int recentAt;
         bool RecentlyActivated(string id, IntPtr hwnd) { return recentId == id && recentWindow == hwnd && unchecked(Environment.TickCount - recentAt) < 500; }
-        public void Toggle(AppRule rule) {
+        public void Toggle(AppRule rule) { Run(rule, true); }
+        // Clicking an app in the preview only ever brings it up (or starts it); it never minimizes it.
+        public void Show(AppRule rule) { Run(rule, false); }
+        void Run(AppRule rule, bool minimizeIfActive) {
             DateTime previous;
             string id = rule.TargetId ?? rule.Name;
             // Only guards against one press being delivered twice; quick deliberate presses must all count.
@@ -210,7 +213,7 @@ namespace WindowSwitch {
                 IntPtr hwnd = Find(rule);
                 if (hwnd != IntPtr.Zero) {
                     IntPtr foreground = Native.GetForegroundWindow();
-                    if (!Native.IsIconic(hwnd) && (WindowIdentity.SameForeground(hwnd, foreground) || RecentlyActivated(id, hwnd))) {
+                    if (minimizeIfActive && !Native.IsIconic(hwnd) && (WindowIdentity.SameForeground(hwnd, foreground) || RecentlyActivated(id, hwnd))) {
                         Native.ShowWindowAsync(hwnd, 6); recentId = null; Log(rule, "已最小化");
                     } else BringForward(rule, hwnd);
                     return;
@@ -285,6 +288,8 @@ namespace WindowSwitch {
             Theme.Set(settings.Theme); BuildUi();
             hints = new HintMonitor(() => settings.Hint, delegate { return HintRows().Where(r => !r.Rule.HideInPreview).ToList(); });
             hints.SettingsRequested += delegate { ShowSettings(); };
+            hints.AppRequested += rule => { if (settings.Applications.Contains(rule)) engine.Show(rule); };
+            hints.EnabledToggleRequested += ToggleRuleEnabled;
             endpoint = new Endpoint(endpointTitle); hotkeys = new HotkeyManager(endpoint.Handle);
             endpoint.Hotkey = delegate(int id) {
                 hints.Interrupt();
@@ -346,7 +351,13 @@ namespace WindowSwitch {
             if (paused) note.Text = "快捷键已暂停";
             else if (hotkeys.AppCount < settings.Applications.Count(a => a.Enabled) || (settings.Minimize.Enabled && hotkeys.MinimizeState != "已生效") || (settings.OpenApp.Enabled && hotkeys.OpenAppState != "已生效")) note.Text = "部分快捷键被其他程序占用";
         }
-        void RefreshRows() { list.SetRows(HintRows()); summary.Text = hotkeys.AppCount + " 个快捷键已生效"; }
+        void RefreshRows() { list.SetRows(HintRows()); summary.Text = hotkeys.AppCount + " 个快捷键已生效"; if (hints != null) hints.Refresh(); }
+        // The status pill (in the list and in the preview) is the app's 启用 switch: the change is saved like an edit.
+        // Switching back on can fail validation (another app now uses the same key); the app then stays off and says why.
+        void ToggleRuleEnabled(AppRule rule) {
+            int index = settings.Applications.IndexOf(rule); if (index < 0 || editing || paused) return;
+            var changed = RuleEditor.Clone(rule); changed.Enabled = !rule.Enabled; UpdateRules(changed, index);
+        }
         // Diagnostics only. Resolving each app's window walks every top-level window (hundreds of ms), so the UI
         // thread just takes a snapshot; a background worker resolves windows and writes the newest snapshot.
         readonly object statusGate = new object(); StatusSnapshot pendingStatus; bool statusWorker;

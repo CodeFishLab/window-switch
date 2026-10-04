@@ -26,6 +26,7 @@ namespace WindowSwitch {
             Ui.Row(root, tools);
             var listSurface = new Card { Dock = DockStyle.Fill, Padding = new Padding(4), Margin = Padding.Empty };
             // Dragging a row reorders the apps (hotkeys, preview and list follow the new order).
+            list.StatusClicked += row => { if (editing) list.SelectedIndex = settings.Applications.IndexOf(row.Rule); else ToggleRuleEnabled(row.Rule); };
             list.Reordered += delegate(int from, int to) {
                 var copy = new List<AppRule>(settings.Applications); var moved = copy[from]; copy.RemoveAt(from); copy.Insert(to, moved);
                 SaveRules(copy);

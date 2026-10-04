@@ -453,7 +453,7 @@ namespace WindowSwitch {
             LoadProfiles(target.ProfileDirectory); UpdateCard();
             var empty = recorders.FirstOrDefault(r => string.IsNullOrWhiteSpace(r.Text)); (empty ?? recorders[0]).Focus();
         }
-        static AppRule Clone(AppRule rule) { var json = new System.Web.Script.Serialization.JavaScriptSerializer(); return json.Deserialize<AppRule>(json.Serialize(rule)); }
+        internal static AppRule Clone(AppRule rule) { var json = new System.Web.Script.Serialization.JavaScriptSerializer(); return json.Deserialize<AppRule>(json.Serialize(rule)); }
         // Reading Chrome/Edge "Local State" and enumerating browser windows takes a few hundred milliseconds,
         // so it runs off the UI thread and the dialog opens at once. The newest request wins.
         void LoadProfiles(string selected) {

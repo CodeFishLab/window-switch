@@ -116,17 +116,19 @@ namespace WindowSwitch {
             return x - start;
         }
     }
+    // The clickable parts of a painted row: the app itself (icon + name) and the status pill.
+    public enum RowHover { None, Target, Status }
+    public struct RowZones { public Rectangle Target, Status; }
     public static class RowPainter {
-        public static string ShortState(string value) { return value == "已生效" ? value : value == "已暂停" ? value : value == "未启用" ? "未启用" : "有冲突"; }
-        public static void Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay) {
-            var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias;
+        public static string ShortState(string value) { return value == "已生效" ? value : value == "已暂停" ? value : value == "已停用" ? value : "有冲突"; }
+        // The status pill doubles as the switch: hovering shows what a click will do.
+        public static bool Switchable(HintRow row) { return row != null && row.Rule != null && ShortState(row.State) != "已暂停"; }
+        public static string SwitchAction(HintRow row) { return ShortState(row.State) == "已停用" ? "启用" : "停用"; }
+        public static void Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay) { Draw(g, bounds, row, font, scale, overlay, RowHover.None); }
+        public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover) {
+            var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias; var zones = new RowZones();
             int pad = (int)(16 * scale), iconSize = (int)(32 * scale), gap = (int)(12 * scale);
             var iconRect = new Rectangle(bounds.X + pad, bounds.Y + (bounds.Height - iconSize) / 2, iconSize, iconSize);
-            Image image = row.Rule == null ? null : AppIcons.Get(row.Rule, iconSize);
-            if (image != null) Dpi.DrawIcon(g, image, iconRect); else {
-                Theme.Fill(g, iconRect, p.SecondaryButtonBackground, (int)(8 * scale));
-                TextRenderer.DrawText(g, string.IsNullOrEmpty(row.Name) ? "W" : row.Name.Substring(0, 1).ToUpperInvariant(), font, iconRect, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            }
             string state = ShortState(row.State); bool success = state == "已生效";
             using (var small = new Font(font.FontFamily, font.Size * .88f)) using (var mono = new Font("Consolas", font.Size * (overlay ? 1.06f : .96f))) {
                 int statusW = TextRenderer.MeasureText(g, state, small).Width + (int)(26 * scale);
@@ -146,19 +148,37 @@ namespace WindowSwitch {
                 var badges = keys.Take(shown).ToList(); if (shown < keys.Count) badges.Add("+" + (keys.Count - shown));
                 int x = status.Left - gap - total;
                 var key = new Rectangle(x, status.Y, Math.Max(0, total), pillH);
-                Color statusBg = success ? p.SuccessBackground : state == "有冲突" ? p.WarningBackground : p.SecondaryButtonBackground;
-                Color statusFg = success ? p.SuccessForeground : state == "有冲突" ? p.WarningForeground : p.SecondaryText;
-                Theme.Fill(g, status, statusBg, pillH / 2); int dot = (int)(5 * scale);
-                using (var b = new SolidBrush(success ? p.StatusDot : statusFg)) g.FillEllipse(b, status.Left + (int)(9 * scale), status.Top + (pillH - dot) / 2, dot, dot);
-                TextRenderer.DrawText(g, state, small, new Rectangle(status.X + (int)(15 * scale), status.Y, status.Width - (int)(17 * scale), status.Height), statusFg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                var nameRect = new Rectangle(iconRect.Right + gap, bounds.Y, Math.Max(1, key.Left - iconRect.Right - gap * 2), bounds.Height);
+                // The app zone hugs the icon and the visible name, so the hover plate never runs under the badges.
+                int nameW = Math.Min(TextRenderer.MeasureText(g, row.Name ?? "", font, Size.Empty, TextFormatFlags.NoPrefix).Width, nameRect.Width), inset = (int)(6 * scale), reach = (int)(8 * scale);
+                zones.Target = new Rectangle(iconRect.Left - reach, bounds.Y + inset, nameRect.Left + nameW + reach - (iconRect.Left - reach), bounds.Height - inset * 2);
+                zones.Status = status;
+                if (hover == RowHover.Target) Theme.Fill(g, zones.Target, p.Hover, (int)(Theme.SmallRadius * scale));
+                Image image = row.Rule == null ? null : AppIcons.Get(row.Rule, iconSize);
+                if (image != null) Dpi.DrawIcon(g, image, iconRect); else {
+                    Theme.Fill(g, iconRect, p.SecondaryButtonBackground, (int)(8 * scale));
+                    TextRenderer.DrawText(g, string.IsNullOrEmpty(row.Name) ? "W" : row.Name.Substring(0, 1).ToUpperInvariant(), font, iconRect, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+                if (hover == RowHover.Status && Switchable(row)) {
+                    // Same pill, same width: it just names the action a click takes.
+                    Theme.Fill(g, status, p.Pressed, pillH / 2);
+                    TextRenderer.DrawText(g, SwitchAction(row), small, status, p.PrimaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                } else {
+                    Color statusBg = success ? p.SuccessBackground : state == "有冲突" ? p.WarningBackground : p.SecondaryButtonBackground;
+                    Color statusFg = success ? p.SuccessForeground : state == "有冲突" ? p.WarningForeground : p.SecondaryText;
+                    Theme.Fill(g, status, statusBg, pillH / 2); int dot = (int)(5 * scale);
+                    using (var b = new SolidBrush(success ? p.StatusDot : statusFg)) g.FillEllipse(b, status.Left + (int)(9 * scale), status.Top + (pillH - dot) / 2, dot, dot);
+                    TextRenderer.DrawText(g, state, small, new Rectangle(status.X + (int)(15 * scale), status.Y, status.Width - (int)(17 * scale), status.Height), statusFg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                }
                 foreach (string badge in badges) {
                     var rect = new Rectangle(x, status.Y, widthOf(badge), pillH); x = rect.Right + badgeGap;
                     Theme.Fill(g, rect, p.ShortcutBadgeBackground, (int)(Theme.SmallRadius * scale));
-                    KeyText.Draw(g, rect, badge, mono, overlay ? p.PrimaryText : p.ShortcutBadgeForeground, p.MutedText, scale);
+                    // A switched-off app's keys recede, so the row reads as inactive at a glance.
+                    KeyText.Draw(g, rect, badge, mono, state == "已停用" ? p.SecondaryText : overlay ? p.PrimaryText : p.ShortcutBadgeForeground, p.MutedText, scale);
                 }
-                var nameRect = new Rectangle(iconRect.Right + gap, bounds.Y, Math.Max(1, key.Left - iconRect.Right - gap * 2), bounds.Height);
                 using (var medium = new Font(font.FontFamily, font.Size, FontStyle.Regular)) TextRenderer.DrawText(g, row.Name ?? "", medium, nameRect, p.PrimaryText, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }
+            return zones;
         }
     }
     public class AppList : ScrollableControl {
@@ -169,8 +189,20 @@ namespace WindowSwitch {
         // Press on a row, then either release (a click: select it) or move past a small threshold (lift the row and
         // reorder; the rows swap live under the pointer, Reordered fires on release).
         int pressIndex = -1, pressY, reorderFrom, reorderAt = -1; bool pressed, reordering;
+        // Where each row's app zone and status pill were last painted, and which of them the pointer is over.
+        // Right after a pill is clicked it shows its new state (not the next action) until the pointer moves off it.
+        readonly Dictionary<int, RowZones> zones = new Dictionary<int, RowZones>();
+        RowHover hoverPart, pressPart; int quietIndex = -1; bool overlayPress;
         public event EventHandler SelectionChanged;
         public event Action<int, int> Reordered;
+        // The app zone (icon + name) is clickable only in the overlay; the status pill switches the app on or off in both.
+        public event Action<HintRow> TargetClicked, StatusClicked;
+        RowHover PartAt(int index, Point at) {
+            RowZones zone; if (index < 0 || index >= Rows.Count || reordering || !zones.TryGetValue(index, out zone)) return RowHover.None;
+            if (RowPainter.Switchable(Rows[index]) && Rectangle.Inflate(zone.Status, 2, 2).Contains(at)) return RowHover.Status;
+            return Overlay && zone.Target.Contains(at) ? RowHover.Target : RowHover.None;
+        }
+        int IndexAt(int y) { int index = (y + offset) / RowHeight; return y >= 0 && index < Rows.Count ? index : -1; }
         public int SelectedIndex { get { return selected; } set { selected = value; Invalidate(); if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty); } }
         public int RowHeight { get { return (int)((Overlay ? 56 : 58) * DeviceDpi / 96f); } }
         public bool Scrollable { get { return Rows.Count * RowHeight > ClientSize.Height; } }
@@ -188,7 +220,7 @@ namespace WindowSwitch {
                 bool lifted = reordering && i == reorderAt; var plate = Rectangle.Inflate(rect, -(int)(4 * scale), -(int)(3 * scale));
                 if (!Overlay && (i == selected || i == hovered || lifted)) Theme.Fill(e.Graphics, plate, lifted || i == selected ? p.Selection : p.Hover, (int)(Theme.SmallRadius * scale));
                 if (lifted) using (var pen = new Pen(p.Focus)) using (var path = Theme.Round(new RectangleF(plate.X + .5f, plate.Y + .5f, plate.Width - 1, plate.Height - 1), (int)(Theme.SmallRadius * scale))) e.Graphics.DrawPath(pen, path);
-                RowPainter.Draw(e.Graphics, rect, Rows[i], Font, scale, Overlay);
+                zones[i] = RowPainter.Draw(e.Graphics, rect, Rows[i], Font, scale, Overlay, i == hovered && !reordering && i != quietIndex ? hoverPart : RowHover.None);
                 // A faint grip on the hovered (or lifted) row hints that rows can be dragged.
                 if (!Overlay && Rows.Count > 1 && (lifted || (!reordering && i == hovered))) {
                     float step = 4.5f * scale, r = 1.3f * scale, cx = 8 * scale, cy = rect.Y + rect.Height / 2f;
@@ -201,14 +233,25 @@ namespace WindowSwitch {
         }
         protected override void OnMouseDown(MouseEventArgs e) {
             if (Scrollable && e.X >= Width - 12 * DeviceDpi / 96f) { dragging = true; dragY = e.Y; dragOffset = offset; Capture = true; }
-            else if (!Overlay && e.Button == MouseButtons.Left) { Focus(); int index = (e.Y + offset) / RowHeight; if (index < Rows.Count) { pressed = true; pressIndex = index; pressY = e.Y; Capture = true; } }
+            // The overlay never takes focus; it only remembers which zone the press started on.
+            else if (Overlay && e.Button == MouseButtons.Left) { pressIndex = IndexAt(e.Y); pressPart = PartAt(pressIndex, e.Location); overlayPress = pressPart != RowHover.None; }
+            else if (!Overlay && e.Button == MouseButtons.Left) { Focus(); int index = (e.Y + offset) / RowHeight; if (index < Rows.Count) { pressed = true; pressIndex = index; pressY = e.Y; pressPart = PartAt(index, e.Location); Capture = true; } }
             base.OnMouseDown(e);
         }
         protected override void OnMouseUp(MouseEventArgs e) {
             if (reordering) FinishReorder();
-            else if (pressed) { pressed = false; int index = (e.Y + offset) / RowHeight; if (e.Y >= 0 && index == pressIndex && index < Rows.Count) SelectedIndex = index; }
+            else if (pressed) {
+                pressed = false; int index = IndexAt(e.Y);
+                if (index >= 0 && index == pressIndex) { if (pressPart == RowHover.Status && PartAt(index, e.Location) == RowHover.Status) ClickStatus(index); else SelectedIndex = index; }
+            } else if (overlayPress) {
+                overlayPress = false; int index = IndexAt(e.Y);
+                if (index >= 0 && index == pressIndex && PartAt(index, e.Location) == pressPart) {
+                    if (pressPart == RowHover.Status) ClickStatus(index); else if (TargetClicked != null) TargetClicked(Rows[index]);
+                }
+            }
             dragging = false; Capture = false; base.OnMouseUp(e);
         }
+        void ClickStatus(int index) { quietIndex = index; Invalidate(); if (StatusClicked != null) StatusClicked(Rows[index]); }
         protected override void OnMouseCaptureChanged(EventArgs e) { if (reordering) FinishReorder(); pressed = false; dragging = false; base.OnMouseCaptureChanged(e); }
         void FinishReorder() { reordering = false; pressed = false; int from = reorderFrom, to = reorderAt; reorderAt = -1; Invalidate(); if (from != to && Reordered != null) Reordered(from, to); }
         protected override void OnMouseMove(MouseEventArgs e) {
@@ -225,12 +268,13 @@ namespace WindowSwitch {
                 }
                 Invalidate(); return;
             }
-            int index = (e.Y + offset) / RowHeight; if (index != hovered) { hovered = index < Rows.Count ? index : -1; Invalidate(); }
-            if (!Overlay) Cursor = hovered >= 0 ? Cursors.Hand : Cursors.Default;
+            int index = (e.Y + offset) / RowHeight; index = index < Rows.Count ? index : -1; var part = PartAt(index, e.Location);
+            if (index != hovered || part != hoverPart) { if (index != quietIndex || part != RowHover.Status) quietIndex = -1; hovered = index; hoverPart = part; Invalidate(); }
+            Cursor = Overlay ? (part != RowHover.None ? Cursors.Hand : Cursors.Default) : hovered >= 0 ? Cursors.Hand : Cursors.Default;
             base.OnMouseMove(e);
         }
         protected override void OnMouseWheel(MouseEventArgs e) { offset = Math.Max(0, Math.Min(MaximumOffset, offset - e.Delta * RowHeight * Math.Max(1, SystemInformation.MouseWheelScrollLines) / 120)); Invalidate(); }
-        protected override void OnMouseLeave(EventArgs e) { hovered = -1; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { hovered = -1; hoverPart = RowHover.None; quietIndex = -1; Invalidate(); base.OnMouseLeave(e); }
         protected override bool IsInputKey(Keys data) { return data == Keys.Up || data == Keys.Down || base.IsInputKey(data); }
         protected override void OnKeyDown(KeyEventArgs e) {
             if (!Overlay && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)) { SelectedIndex = Math.Max(0, Math.Min(Rows.Count - 1, selected + (e.KeyCode == Keys.Down ? 1 : -1))); int y = selected * RowHeight; if (y < offset || y + RowHeight > offset + Height) offset = Math.Max(0, Math.Min(MaximumOffset, y - Height / 2)); Invalidate(); e.Handled = true; }

@@ -64,7 +64,10 @@ namespace WindowSwitch {
         public bool NativeBackdrop { get; private set; }
         public AppList RowList { get { return list; } }
         public event EventHandler SettingsRequested;
+        public event Action<HintRow> AppClicked, SwitchClicked;
         public HintOverlay() {
+            list.TargetClicked += row => { if (AppClicked != null) AppClicked(row); };
+            list.StatusClicked += row => { if (SwitchClicked != null) SwitchClicked(row); };
             Text = "WindowSwitch.HintOverlay"; FormBorderStyle = FormBorderStyle.None; ControlBox = false; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
             Padding = new Padding(4, 12, 4, 12); Controls.Add(list); Controls.Add(gear); gear.BringToFront(); ClientSize = new Size(460, 136);
             gear.Click += delegate { if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty); };
@@ -120,15 +123,20 @@ namespace WindowSwitch {
             options = setting; rows = content; timer.Tick += delegate { Tick(); }; timer.Start();
         }
         public event EventHandler SettingsRequested;
+        // Clicking an app in the preview opens it (the preview steps aside); its status pill switches it on or off
+        // while the preview stays up to show the new state.
+        public event Action<AppRule> AppRequested, EnabledToggleRequested;
         Point shownAt;
         void EnsureOverlay() {
             if (overlay != null) return;
             overlay = new HintOverlay();
-            overlay.SettingsRequested += delegate {
-                Reason = OverlayDisplayReason.None; overlay.Hide(); state.Block();
-                if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty);
-            };
+            overlay.SettingsRequested += delegate { Dismiss(); if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty); };
+            overlay.AppClicked += row => { Dismiss(); if (AppRequested != null) AppRequested(row.Rule); };
+            overlay.SwitchClicked += row => { if (EnabledToggleRequested != null) EnabledToggleRequested(row.Rule); };
         }
+        // The hold key may still be down: blocking the hold state keeps the preview from popping straight back up.
+        void Dismiss() { Reason = OverlayDisplayReason.None; overlay.Hide(); state.Block(); }
+        public void Refresh() { if (Visible) overlay.RowList.SetRows(rows()); }
         void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); overlay.Present(rows(), option); Reason = reason; shownAt = Cursor.Position; }
         // Once the pointer has moved onto the visible preview (e.g. towards the gear), it stays until the pointer leaves,
         // even after the hold key is released. A pointer that merely happened to be there when it appeared does not count.

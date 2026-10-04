@@ -30,7 +30,7 @@ namespace WindowSwitch {
         public void Apply(Settings settings, bool paused) {
             Clear(); states.Clear(); var hooked = new List<SidedHotkeys.Binding>();
             for (int i = 0; i < settings.Applications.Count; i++) {
-                var rule = settings.Applications[i]; if (paused || !rule.Enabled) { states[rule] = paused ? "已暂停" : "未启用"; continue; }
+                var rule = settings.Applications[i]; if (paused || !rule.Enabled) { states[rule] = paused ? "已暂停" : "已停用"; continue; }
                 string failure = null; int n = 0;
                 foreach (string shortcut in rule.AllShortcuts().Take(MaxShortcuts)) {
                     KeyChord key = KeyChord.Parse(shortcut); int id = Id(i, n++);
@@ -48,7 +48,7 @@ namespace WindowSwitch {
         // Window Switch's own shortcuts (最小化当前窗口, 打开窗口快捷键).
         string RegisterGlobal(GlobalShortcut shortcut, int id, List<SidedHotkeys.Binding> hooked, bool paused) {
             if (paused) return "已暂停";
-            if (shortcut == null || !shortcut.Enabled) return "未启用";
+            if (shortcut == null || !shortcut.Enabled) return "已停用";
             if (shortcut.Sides != 0) { hooked.Add(new SidedHotkeys.Binding { Id = id, Chord = new KeyChord { Modifiers = shortcut.Modifiers, Key = shortcut.VirtualKey, Sides = shortcut.Sides } }); return sided.Installed ? "已生效" : "无法监听左右键"; }
             return Native.RegisterHotKey(handle, id, shortcut.Modifiers | 0x4000, shortcut.VirtualKey) ? "已生效" : "被占用";
         }
