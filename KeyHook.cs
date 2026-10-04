@@ -10,6 +10,10 @@ namespace WindowSwitch {
     // thread is slow to respond, and the UI thread can be busy. Matches are posted to the endpoint window.
     public sealed class SidedHotkeys : IDisposable {
         public const int Message = 0x8007;
+        // While the hold preview is up, ↑ ↓ Enter Esc steer it instead of reaching the active app (posted with the key).
+        public const int NavigateMessage = 0x800A;
+        public volatile bool Navigating;
+        public const ushort MaskVirtualKey = MaskKey;
         public struct Binding { public int Id; public KeyChord Chord; }
         delegate IntPtr HookProc(int code, IntPtr wparam, IntPtr lparam);
         [StructLayout(LayoutKind.Sequential)] struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
@@ -61,6 +65,11 @@ namespace WindowSwitch {
                     // never reaches that state.) This holds even when other keyboard tools re-send or reorder events,
                     // where pairing our key-down with "its" key-up does not.
                     bool repeat = down && Down((int)info.vkCode);
+                    if (down && Navigating && IsNavigation(info.vkCode)) {
+                        if (!repeat) Mask(); swallowed.Add(info.vkCode);
+                        Native.PostMessage(target, NavigateMessage, new IntPtr((int)info.vkCode), IntPtr.Zero);
+                        return new IntPtr(1);
+                    }
                     if (repeat && swallowed.Contains(info.vkCode)) return new IntPtr(1);
                     if (down && !repeat) swallowed.Remove(info.vkCode);
                     var current = bindings;
@@ -76,6 +85,7 @@ namespace WindowSwitch {
             }
             return CallNextHookEx(hook, code, wparam, lparam);
         }
+        public static bool IsNavigation(uint vk) { return vk == 0x26 || vk == 0x28 || vk == 0x0D || vk == 0x1B; }
         static bool IsModifier(uint vk) { return (vk >= 0xA0 && vk <= 0xA5) || vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C; }
         static bool Down(int vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; }
         // Exact match: required modifiers (on the named side, or either side when unnamed) are down; others are up.

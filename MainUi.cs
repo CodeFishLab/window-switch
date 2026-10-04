@@ -144,8 +144,12 @@ namespace WindowSwitch {
         }
         void RestoreWidth() { if (widened && Width == widenedWidth && WindowState == FormWindowState.Normal) { Width = restoreWidth; Left = restoreLeft; } widened = false; }
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
-            // Esc closes the sheet, except while a shortcut field is recording (there it cancels the recording).
-            if (keyData == Keys.Escape && sheet != null && !(ActiveControl is ShortcutRecorder)) { if (!sheet.HandleEscape()) CloseEditor(true); return true; }
+            // Esc: a recording shortcut field cancels the recording; an open sheet closes; otherwise the window goes away,
+            // like pressing 打开窗口快捷键 again.
+            if (keyData == Keys.Escape && !(ActiveControl is ShortcutRecorder)) {
+                if (sheet != null) { if (!sheet.HandleEscape()) CloseEditor(true); } else Dismiss();
+                return true;
+            }
             return base.ProcessCmdKey(ref msg, keyData);
         }
         // Reports every mouse press inside this app (client or caption area) with the window it landed on.
@@ -196,10 +200,13 @@ namespace WindowSwitch {
             void End() {
                 if (!draft) return;
                 draft = false; action.Text = "停用"; action.Primary = false; action.Invalidate(); clicks.Stop();
+                if (Recorder.Focused || action.Focused || form.ActiveControl == Recorder || form.ActiveControl == action) ParkFocus();
                 form.editing = false; form.hints.Suspend(false); form.RegisterRules();
-                if (Recorder.Focused) form.ActiveControl = null;
                 Refresh(true);
             }
+            // Focus left on the field keeps it recording, and a focused button that gets disabled hands focus to the next
+            // control in tab order — the other shortcut field, which would then start recording. The app list is neutral.
+            void ParkFocus() { form.ActiveControl = form.list; }
             void Save() {
                 string text = Recorder.Text.Trim(); var saved = Saved;
                 if (text.Length == 0 || text == "未设置" || (saved.Enabled && text == saved.Display)) { End(); return; }
@@ -219,7 +226,9 @@ namespace WindowSwitch {
             // Shows the saved shortcut and its state; left alone while it is being edited.
             public void Refresh(bool force = false) {
                 if (draft || (Recorder.Focused && !force)) return;
-                var saved = Saved; Recorder.Text = saved.Enabled ? saved.Display : "未设置"; action.Enabled = saved.Enabled;
+                var saved = Saved; Recorder.Text = saved.Enabled ? saved.Display : "未设置";
+                if (!saved.Enabled && action.Focused) ParkFocus(); // e.g. right after clicking 停用
+                action.Enabled = saved.Enabled;
                 string current = state();
                 Caption.Text = !saved.Enabled || current == "已生效" ? (idleHint ?? "") : current;
             }

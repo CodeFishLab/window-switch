@@ -88,8 +88,15 @@ namespace WindowSwitch {
         protected override void OnShown(EventArgs e) {
             if (!(this is HintOverlay)) FitToScreen();
             shownOnce = true;
-            if (uncloakOnShown) { uncloakOnShown = false; Refresh(); NativeStyle.Cloak(Handle, false); }
+            if (uncloakOnShown) { uncloakOnShown = false; Reveal(); }
             base.OnShown(e);
+        }
+        // Paints the window and every child control right now (Refresh() only paints the form itself; children would
+        // paint later, after the window is already on screen), then takes the window out of its cloak.
+        void Reveal() {
+            if (!IsHandleCreated) return;
+            Native.RedrawWindow(Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400);
+            NativeStyle.Cloak(Handle, false);
         }
         protected override void OnHandleCreated(EventArgs e) {
             base.OnHandleCreated(e); NativeStyle.TitleBar(Handle, Theme.Current.Dark);
@@ -97,9 +104,13 @@ namespace WindowSwitch {
             if (!(this is HintOverlay) && !shownOnce) { NativeStyle.Cloak(Handle, true); uncloakOnShown = true; }
         }
         protected override void SetVisibleCore(bool value) {
-            if (!value || this is HintOverlay || !IsHandleCreated || uncloakOnShown) { base.SetVisibleCore(value); return; }
+            if (!value || this is HintOverlay) { base.SetVisibleCore(value); return; }
+            // First show: the handle is created cloaked (here, or earlier when the app started in the background), and
+            // Load and layout run inside base.SetVisibleCore. Reveal right away instead of waiting for the deferred
+            // Shown event — while that is pending the window counts as open but is invisible.
+            if (!IsHandleCreated || uncloakOnShown) { base.SetVisibleCore(true); if (uncloakOnShown) { uncloakOnShown = false; Reveal(); } return; }
             NativeStyle.Cloak(Handle, true);
-            try { base.SetVisibleCore(true); Refresh(); } finally { NativeStyle.Cloak(Handle, false); }
+            try { base.SetVisibleCore(true); } finally { Reveal(); }
         }
         protected override void Dispose(bool disposing) { if (disposing) { Theme.Changing -= ThemeChanging; Theme.Changed -= ThemeChanged; } base.Dispose(disposing); }
         public void FitToScreen() {
@@ -278,6 +289,7 @@ namespace WindowSwitch {
         readonly TargetCard card = new TargetCard();
         readonly Toggle enabled = new Toggle { Checked = true, AccessibleName = "启用这个快捷键" };
         readonly Toggle inPreview = new Toggle { Checked = true, AccessibleName = "显示预览" };
+        readonly Toggle previewSides = new Toggle { Checked = true, AccessibleName = "预览显示 Left / Right" };
         readonly Disclosure disclosure = new Disclosure { Text = "高级设置" };
         readonly TableLayoutPanel advanced = Ui.Table(2);
         Label error { get { return Error; } }
@@ -326,6 +338,8 @@ namespace WindowSwitch {
 
             Ui.Row(Content, Ui.ToggleRow("启用这个快捷键", enabled));
             Ui.Row(Content, Ui.ToggleRow("显示预览", inPreview));
+            var sidesRow = Ui.ToggleRow("预览显示 Left / Right", previewSides); Ui.Row(Content, sidesRow);
+            inPreview.CheckedChanged += delegate { sidesRow.Visible = inPreview.Checked; };
 
             disclosure.Dock = DockStyle.None; disclosure.Anchor = AnchorStyles.Left; disclosure.Margin = Padding.Empty; Ui.Row(Content, disclosure);
             advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56)); advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44)); advanced.Visible = false; advanced.Margin = new Padding(0, 10, 0, 0);
@@ -339,7 +353,7 @@ namespace WindowSwitch {
             disclosure.ExpandedChanged += delegate { advanced.Visible = disclosure.Expanded; if (disclosure.Expanded) Body.RevealLater(advanced); };
 
             if (existing != null) {
-                target = Clone(existing); name.Text = existing.Name; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview;
+                target = Clone(existing); name.Text = existing.Name; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview; previewSides.Checked = !existing.HideSidesInPreview;
                 hasTarget = true; targetTitle = TargetTitle(existing); LoadProfiles(existing.ProfileDirectory);
             }
             if (recorders.Count == 0) AddShortcutRow("");
@@ -496,7 +510,7 @@ namespace WindowSwitch {
                 var seen = new HashSet<string>(); foreach (string key in keys) if (!seen.Add(KeyChord.Parse(key).Id)) throw new ArgumentException("同一个快捷键填写了两次：" + KeyChord.Pretty(key));
                 var selectedProfile = profileChoice.SelectedValue as BrowserProfile;
                 if (target.TargetType == TargetType.Profile && selectedProfile != null && !selectedProfile.UserData.Equals(userData.Text.Trim(), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("数据目录已改变，请点击高级设置里的“重新识别用户”。");
-                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked;
+                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked; proposed.HideSidesInPreview = !previewSides.Checked;
                 if (ValidateRule != null) { string message = ValidateRule(proposed); if (message != null) throw new ArgumentException(message); }
                 Rule = proposed; RaiseSaved();
             } catch (Exception ex) { error.Text = ex.Message; }

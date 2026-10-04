@@ -23,6 +23,7 @@ namespace WindowSwitch {
         public string OpenAppState { get; private set; }
         public int AppCount { get { return registered.Count; } }
         readonly SidedHotkeys sided;
+        public bool Navigating { set { sided.Navigating = value; } }
         public HotkeyManager(IntPtr hwnd) { handle = hwnd; sided = new SidedHotkeys(hwnd); }
         public AppRule Rule(int id) { AppRule rule; return registered.TryGetValue(id, out rule) ? rule : null; }
         public string State(AppRule rule) { string value; return states.TryGetValue(rule, out value) ? value : "未注册"; }

@@ -102,6 +102,15 @@ namespace WindowSwitch {
         void UpdateSurface() { BackColor = Theme.Current.OverlayBackground; list.BackColor = BackColor; RoundRegion(); Invalidate(true); }
         protected override void ApplyTheme() { UpdateSurface(); NativeStyle.TitleBar(Handle, Theme.Current.Dark); }
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); if (NativeStyle.SystemCorners) return; e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using (var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)(Theme.LargeRadius * DeviceDpi / 96f))) using (var pen = new Pen(Theme.Current.OverlayBorder)) e.Graphics.DrawPath(pen, path); }
+        // Logical width: 460 (a calm, steady card), growing up to 500 only when names and keys need it.
+        public const int MinWidth = 460, MaxWidth = 500;
+        int FitWidth(List<HintRow> rows) {
+            float scale = DeviceDpi / 96f;
+            using (var g = list.CreateGraphics()) {
+                int px = RowPainter.OverlayRowWidth(g, rows, list.Font, scale) + Padding.Horizontal + (int)(2 * scale);
+                return Math.Max(MinWidth, Math.Min(MaxWidth, (int)Math.Ceiling(px / scale)));
+            }
+        }
         public void Present(List<HintRow> rows, HintOptions options) {
             if (rows.Count == 0) { Hide(); return; }
             // The desktop itself spans every screen, so with nothing but the desktop active the pointer decides too.
@@ -109,10 +118,10 @@ namespace WindowSwitch {
             bool byWindow = !options.FollowMouse && foreground != IntPtr.Zero && cls != "Progman" && cls != "WorkerW";
             Screen screen = byWindow ? Screen.FromHandle(foreground) : Screen.FromPoint(Cursor.Position);
             Rectangle area = screen.WorkingArea; int dpi = byWindow ? (int)NativeStyle.Dpi(foreground) : DeviceDpi;
-            Rectangle rect = OverlayLayout.Calculate(area, dpi, rows.Count, 500, options.Position);
+            Rectangle rect = OverlayLayout.Calculate(area, dpi, rows.Count, FitWidth(rows), options.Position);
             Native.SetWindowPos(Handle, new IntPtr(-1), rect.X, rect.Y, rect.Width, rect.Height, 0x10);
             UpdateSurface(); list.SetRows(rows); Show();
-            rect = OverlayLayout.Calculate(area, DeviceDpi, rows.Count, 500, options.Position);
+            rect = OverlayLayout.Calculate(area, DeviceDpi, rows.Count, FitWidth(rows), options.Position);
             Native.SetWindowPos(Handle, new IntPtr(-1), rect.X, rect.Y, rect.Width, rect.Height, 0x10 | 0x40); PerformLayout(); list.SetRows(rows); RoundRegion();
         }
     }
@@ -139,10 +148,28 @@ namespace WindowSwitch {
         // Clicking an app in the preview opens it (the preview steps aside); its status pill switches it on or off
         // while the preview stays up to show the new state.
         public event Action<AppRule> AppRequested, EnabledToggleRequested;
+        // True while a hold preview is on screen: ↑ ↓ Enter Esc then steer it (the keyboard hook captures them).
+        public event Action<bool> NavigableChanged;
+        bool navigable;
+        void UpdateNavigable() { bool now = Visible && Reason == OverlayDisplayReason.Hold; if (now == navigable) return; navigable = now; if (NavigableChanged != null) NavigableChanged(now); }
+        // ↑/↓ move a highlight (wrapping), releasing the hold key or Enter opens it, Esc closes the preview.
+        public void Navigate(int key) {
+            if (!Visible || Reason != OverlayDisplayReason.Hold) return;
+            var list = overlay.RowList; int n = list.Rows.Count; if (n == 0) return;
+            if (key == 0x28) list.Highlight = list.Highlight < 0 ? 0 : (list.Highlight + 1) % n;
+            else if (key == 0x26) list.Highlight = list.Highlight < 0 ? n - 1 : (list.Highlight - 1 + n) % n;
+            else if (key == 0x0D) OpenHighlighted();
+            else if (key == 0x1B) Dismiss();
+        }
+        bool OpenHighlighted() {
+            var list = overlay.RowList; int i = list.Highlight; if (i < 0 || i >= list.Rows.Count) return false;
+            var rule = list.Rows[i].Rule; Dismiss(); if (AppRequested != null) AppRequested(rule); return true;
+        }
         Point shownAt;
         void EnsureOverlay() {
             if (overlay != null) return;
             overlay = new HintOverlay();
+            overlay.VisibleChanged += delegate { UpdateNavigable(); };
             overlay.SettingsRequested += delegate { Dismiss(); if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty); };
             overlay.AppClicked += row => { Dismiss(); if (AppRequested != null) AppRequested(row.Rule); };
             overlay.SwitchClicked += row => { if (EnabledToggleRequested != null) EnabledToggleRequested(row.Rule); };
@@ -150,7 +177,7 @@ namespace WindowSwitch {
         // The hold key may still be down: blocking the hold state keeps the preview from popping straight back up.
         void Dismiss() { Reason = OverlayDisplayReason.None; overlay.Hide(); state.Block(); }
         public void Refresh() { if (Visible) overlay.RowList.SetRows(rows()); }
-        void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); overlay.Present(rows(), option); Reason = reason; shownAt = Cursor.Position; }
+        void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); Reason = reason; overlay.RowList.Highlight = -1; overlay.Present(rows(), option); shownAt = Cursor.Position; UpdateNavigable(); }
         // Once the pointer has moved onto the visible preview (e.g. towards the gear), it stays until the pointer leaves,
         // even after the hold key is released. A pointer that merely happened to be there when it appeared does not count.
         bool PointerResting() { if (!Visible) return false; var at = Cursor.Position; return at != shownAt && overlay.Bounds.Contains(at); }
@@ -160,6 +187,8 @@ namespace WindowSwitch {
         public void Suspend(bool value) { suspended = value; state.Reset(); if (value) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         public void Interrupt() { state.Block(); if (Reason == OverlayDisplayReason.Hold) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         static bool Down(int key) { return (Native.GetAsyncKeyState(key) & 0x8000) != 0; }
+        // Reads whether a key is down; replaceable so tests can hold keys without touching the real keyboard.
+        public Func<int, bool> KeyState = Down;
         void Tick() {
             LastTick = Environment.TickCount;
             HintOptions option = options();
@@ -171,17 +200,21 @@ namespace WindowSwitch {
             }
             if (!option.Enabled) { state.Reset(); if (overlay != null) overlay.Hide(); Reason = OverlayDisplayReason.None; return; }
             if (previousKey != option.Key) { state.Reset(); previousKey = option.Key; }
-            bool held = Down(option.Key), other = false;
+            bool held = KeyState(option.Key), other = false;
             if (held) {
                 for (int key = 8; key < 255; key++) {
+                    // The hook's mask keystroke and, while the preview is up, the keys that steer it are not "other" keys.
+                    if (key == SidedHotkeys.MaskVirtualKey || (Visible && SidedHotkeys.IsNavigation((uint)key))) continue;
                     if (key == option.Key || (key == 0x11 && (option.Key == 0xA2 || option.Key == 0xA3)) || (key == 0x10 && (option.Key == 0xA0 || option.Key == 0xA1)) || (key == 0x12 && (option.Key == 0xA4 || option.Key == 0xA5))) continue;
-                    if (Down(key)) { other = true; break; }
+                    if (KeyState(key)) { other = true; break; }
                 }
             }
             bool show = state.Observe(held, other, Environment.TickCount, option.DelayMs);
             LastHeld = held; LastOther = other;
             if (show && !Visible) Present(OverlayDisplayReason.Hold, option);
+            else if (!show && Visible && Reason == OverlayDisplayReason.Hold && !held && OpenHighlighted()) { }
             else if (!show && Visible && !PointerResting()) { overlay.Hide(); Reason = OverlayDisplayReason.None; }
+            UpdateNavigable();
         }
         public void ShowPreview() { ShowPreview(OverlayDisplayReason.ManualPreview); }
         public void ShowPreview(OverlayDisplayReason reason) { manualUntil = DateTime.UtcNow.AddSeconds(5); Present(reason, options()); }

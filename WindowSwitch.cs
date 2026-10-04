@@ -34,6 +34,8 @@ namespace WindowSwitch {
         public List<string> MoreShortcuts { get; set; }
         // Left out of the hold-to-preview overlay (the shortcut keeps working and stays in the main list).
         public bool HideInPreview { get; set; }
+        // The preview shows this app's keys without "Left"/"Right" (the main list keeps them).
+        public bool HideSidesInPreview { get; set; }
         public AppRule() { Enabled = true; Arguments = ""; TitleContains = ""; TargetId = Guid.NewGuid().ToString("N"); MoreShortcuts = new List<string>(); }
         public IEnumerable<string> AllShortcuts() {
             if (!string.IsNullOrWhiteSpace(Shortcut)) yield return Shortcut;
@@ -249,7 +251,7 @@ namespace WindowSwitch {
         }
     }
     public sealed class Endpoint : NativeWindow, IDisposable {
-        public Action<int> Hotkey, Toggle;
+        public Action<int> Hotkey, Toggle, Navigate;
         public Action Open, Quit, Preview, Diagnose, SystemTheme;
         public Endpoint(string title) { CreateHandle(new CreateParams { Caption = title }); }
         protected override void WndProc(ref Message msg) {
@@ -258,6 +260,7 @@ namespace WindowSwitch {
             else if (msg.Msg == 0x8002 && Open != null) Open();
             else if (msg.Msg == 0x8003 && Quit != null) Quit();
             else if (msg.Msg == 0x8004 && Preview != null) Preview();
+            else if (msg.Msg == SidedHotkeys.NavigateMessage && Navigate != null) Navigate(msg.WParam.ToInt32());
             else if (msg.Msg == 0x8005 && Diagnose != null) Diagnose();
             else if (msg.Msg == 0x8006 && SystemTheme != null) SystemTheme();
             base.WndProc(ref msg);
@@ -290,6 +293,7 @@ namespace WindowSwitch {
             hints.SettingsRequested += delegate { ShowSettings(); };
             hints.AppRequested += rule => { if (settings.Applications.Contains(rule)) engine.Show(rule); };
             hints.EnabledToggleRequested += ToggleRuleEnabled;
+            hints.NavigableChanged += value => { if (hotkeys != null) hotkeys.Navigating = value; };
             endpoint = new Endpoint(endpointTitle); hotkeys = new HotkeyManager(endpoint.Handle);
             endpoint.Hotkey = delegate(int id) {
                 hints.Interrupt();
@@ -298,6 +302,7 @@ namespace WindowSwitch {
                 AppRule rule = hotkeys.Rule(id); if (rule != null) engine.Toggle(rule);
             };
             endpoint.Toggle = delegate(int index) { if (index >= 0 && index < settings.Applications.Count) { hints.Interrupt(); engine.Toggle(settings.Applications[index]); } };
+            endpoint.Navigate = key => hints.Navigate(key);
             endpoint.Open = ShowSettings; endpoint.Quit = Quit; endpoint.Preview = delegate { hints.ShowPreview(); }; endpoint.Diagnose = WriteStatus;
             endpoint.SystemTheme = Theme.RefreshSystem;
             engine.Report = delegate(string name, string action) {
@@ -386,6 +391,8 @@ namespace WindowSwitch {
         public void ShowSettings() { refreshing = true; startup.Checked = IsStartupEnabled(); refreshing = false; Show(); WindowState = FormWindowState.Normal; FitToScreen(); Activate(); if (Native.GetForegroundWindow() != Handle) SwitchEngine.ForceForeground(Handle); }
         // Hidden windows are not on the taskbar anyway; toggling ShowInTaskbar would recreate the window (and flash).
         void HideToTray() { CloseEditor(false); Hide(); WindowState = FormWindowState.Normal; }
+        // With neither a tray icon nor an open-window shortcut, a hidden window could not be brought back: minimize instead.
+        void Dismiss() { if (settings.ShowTrayIcon || settings.OpenApp.Enabled) HideToTray(); else WindowState = FormWindowState.Minimized; }
         public void Quit() { exiting = true; Close(); Application.ExitThread(); }
         protected override void Dispose(bool disposing) {
             if (disposing) { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; retry.Dispose(); hints.Dispose(); hotkeys.Dispose(); engine.Dispose(); tray.Visible = false; tray.Dispose(); endpoint.Dispose(); }

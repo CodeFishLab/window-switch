@@ -66,7 +66,15 @@ namespace WindowSwitch {
         protected override bool IsInputKey(Keys keyData) { return (keyData & Keys.KeyCode) != Keys.Tab; }
         protected override void OnKeyDown(KeyEventArgs e) {
             if (e.KeyCode == Keys.Tab) { base.OnKeyDown(e); return; } e.SuppressKeyPress = true;
-            if (e.KeyCode == Keys.Escape) { Text = before; KeyCode = beforeKey; if (Cancelled != null) Cancelled(this, EventArgs.Empty); Parent.SelectNextControl(this, true, true, true, true); return; }
+            // Esc restores the previous key and moves on. Cancelled comes last, once focus has moved: a handler that
+            // finds the field still focused (nothing nearby could take focus) can then park focus somewhere neutral.
+            // Focus never moves into another shortcut field: that would put it in recording mode.
+            if (e.KeyCode == Keys.Escape) {
+                Text = before; KeyCode = beforeKey;
+                var next = Parent.Controls.Cast<Control>().Where(c => c != this && !(c is ShortcutRecorder) && c.TabStop && c.CanSelect).OrderBy(c => c.TabIndex).FirstOrDefault();
+                if (next != null) next.Select();
+                if (Cancelled != null) Cancelled(this, EventArgs.Empty); return;
+            }
             if (SingleKey) {
                 int code = (int)e.KeyCode;
                 if (e.KeyCode == Keys.ControlKey) code = (Native.GetAsyncKeyState(0xA3) & 0x8000) != 0 ? 0xA3 : 0xA2;
@@ -89,6 +97,12 @@ namespace WindowSwitch {
         static void Split(string part, out string prefix, out string key) {
             prefix = ""; key = part;
             foreach (string side in new[] { "Left ", "Right " }) if (part.StartsWith(side, StringComparison.Ordinal) && part.Length > side.Length) { prefix = side; key = part.Substring(side.Length); break; }
+        }
+        // "Left Alt+Right Shift+C" -> "Alt+Shift+C".
+        public static string WithoutSides(string pretty) {
+            var parts = (pretty ?? "").Split('+'); string prefix, key;
+            for (int i = 0; i < parts.Length; i++) { Split(parts[i], out prefix, out key); parts[i] = key; }
+            return string.Join("+", parts);
         }
         static Color Mix(Color a, Color b) { return Color.FromArgb((a.R + b.R) / 2, (a.G + b.G) / 2, (a.B + b.B) / 2); }
         public static int Width(Graphics g, string pretty, Font font, float scale) {
@@ -125,17 +139,41 @@ namespace WindowSwitch {
         public static bool Switchable(HintRow row) { return row != null && row.Rule != null && ShortState(row.State) != "已暂停"; }
         public static string SwitchAction(HintRow row) { return ShortState(row.State) == "已停用" ? "启用" : "停用"; }
         public static void Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay) { Draw(g, bounds, row, font, scale, overlay, RowHover.None); }
-        public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover) {
+        // The preview reads as a table: names in one column, the status pill close to the right edge, and each app's key
+        // centred in the space between them (one shared centre line for every row).
+        const int OverlayNameMax = 160, OverlayColumnGap = 20, OverlayEdge = 10;
+        static List<string> Keys(HintRow row, bool overlay) {
+            return (row.Shortcuts ?? new List<string> { row.Shortcut ?? "" }).Take(overlay ? 1 : int.MaxValue).Select(k => KeyChord.Pretty(k))
+                .Select(k => overlay && row.Rule != null && row.Rule.HideSidesInPreview ? KeyText.WithoutSides(k) : k).ToList();
+        }
+        static Font Mono(Font font, bool overlay) { return new Font("Consolas", font.Size * (overlay ? 1.06f : .96f)); }
+        static Font Small(Font font) { return new Font(font.FontFamily, font.Size * .88f); }
+        public static int OverlayNameColumn(Graphics g, IEnumerable<HintRow> rows, Font font, float scale) {
+            int w = 0; foreach (var row in rows) w = Math.Max(w, TextRenderer.MeasureText(g, row.Name ?? "", font, Size.Empty, TextFormatFlags.NoPrefix).Width);
+            return Math.Min(w, (int)(OverlayNameMax * scale));
+        }
+        // Pixel width a preview row needs: padding, icon, name column, key column, pill.
+        public static int OverlayRowWidth(Graphics g, IList<HintRow> rows, Font font, float scale) {
+            int keys = 0, pill = 0;
+            using (var small = Small(font)) using (var mono = Mono(font, true))
+                foreach (var row in rows) {
+                    foreach (string k in Keys(row, true)) keys = Math.Max(keys, KeyText.Width(g, k, mono, scale) + (int)(22 * scale));
+                    pill = Math.Max(pill, TextRenderer.MeasureText(g, ShortState(row.State), small).Width + (int)(26 * scale));
+                }
+            return (int)((16 + 32 + 12 + OverlayColumnGap + 12 + OverlayEdge) * scale) + OverlayNameColumn(g, rows, font, scale) + keys + pill;
+        }
+        public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0) {
             var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias; var zones = new RowZones();
             int pad = (int)(16 * scale), iconSize = (int)(32 * scale), gap = (int)(12 * scale);
             var iconRect = new Rectangle(bounds.X + pad, bounds.Y + (bounds.Height - iconSize) / 2, iconSize, iconSize);
             string state = ShortState(row.State); bool success = state == "已生效";
-            using (var small = new Font(font.FontFamily, font.Size * .88f)) using (var mono = new Font("Consolas", font.Size * (overlay ? 1.06f : .96f))) {
+            using (var small = Small(font)) using (var mono = Mono(font, overlay)) {
                 int statusW = TextRenderer.MeasureText(g, state, small).Width + (int)(26 * scale);
                 int pillH = Math.Min(bounds.Height - (int)(14 * scale), font.Height + (int)((overlay ? 11 : 8) * scale));
-                var status = new Rectangle(bounds.Right - pad - statusW, bounds.Y + (bounds.Height - pillH) / 2, statusW, pillH);
+                bool columns = overlay && nameColumn > 0;
+                var status = new Rectangle(bounds.Right - (columns ? (int)(OverlayEdge * scale) : pad) - statusW, bounds.Y + (bounds.Height - pillH) / 2, statusW, pillH);
                 // One badge per shortcut; when they do not fit next to the name, the rest collapse into "+n".
-                var keys = (row.Shortcuts ?? new List<string> { row.Shortcut ?? "" }).Take(overlay ? 1 : int.MaxValue).Select(k => KeyChord.Pretty(k)).ToList();
+                var keys = Keys(row, overlay);
                 // The name keeps its real width (up to 140 px logical), so short names leave room for more badges.
                 int nameNeed = Math.Min(TextRenderer.MeasureText(g, row.Name ?? "", font).Width, (int)(140 * scale));
                 int badgeGap = (int)(6 * scale), room = Math.Max(0, status.Left - gap - (iconRect.Right + gap + nameNeed + gap));
@@ -147,8 +185,13 @@ namespace WindowSwitch {
                 }
                 var badges = keys.Take(shown).ToList(); if (shown < keys.Count) badges.Add("+" + (keys.Count - shown));
                 int x = status.Left - gap - total;
+                // Preview: the key is centred on the card itself, but never closer to the names or the pill than the gaps.
+                if (columns) {
+                    int from = iconRect.Right + gap + nameColumn + (int)(OverlayColumnGap * scale);
+                    x = Math.Min(Math.Max(from, bounds.X + (bounds.Width - total) / 2), x);
+                }
                 var key = new Rectangle(x, status.Y, Math.Max(0, total), pillH);
-                var nameRect = new Rectangle(iconRect.Right + gap, bounds.Y, Math.Max(1, key.Left - iconRect.Right - gap * 2), bounds.Height);
+                var nameRect = new Rectangle(iconRect.Right + gap, bounds.Y, Math.Max(1, columns ? Math.Min(nameColumn, key.Left - iconRect.Right - gap) : key.Left - iconRect.Right - gap * 2), bounds.Height);
                 // The app zone hugs the icon and the visible name, so the hover plate never runs under the badges.
                 int nameW = Math.Min(TextRenderer.MeasureText(g, row.Name ?? "", font, Size.Empty, TextFormatFlags.NoPrefix).Width, nameRect.Width), inset = (int)(6 * scale), reach = (int)(8 * scale);
                 zones.Target = new Rectangle(iconRect.Left - reach, bounds.Y + inset, nameRect.Left + nameW + reach - (iconRect.Left - reach), bounds.Height - inset * 2);
@@ -193,6 +236,16 @@ namespace WindowSwitch {
         // Right after a pill is clicked it shows its new state (not the next action) until the pointer moves off it.
         readonly Dictionary<int, RowZones> zones = new Dictionary<int, RowZones>();
         RowHover hoverPart, pressPart; int quietIndex = -1; bool overlayPress;
+        // The overlay's keyboard selection (↑/↓ while the hold key is down); -1 when none.
+        int highlight = -1;
+        public int Highlight {
+            get { return highlight; }
+            set {
+                highlight = value < Rows.Count ? value : -1;
+                if (highlight >= 0) { int y = highlight * RowHeight; if (y < offset || y + RowHeight > offset + ClientSize.Height) offset = Math.Max(0, Math.Min(MaximumOffset, y - (ClientSize.Height - RowHeight) / 2)); }
+                Invalidate();
+            }
+        }
         public event EventHandler SelectionChanged;
         public event Action<int, int> Reordered;
         // The app zone (icon + name) is clickable only in the overlay; the status pill switches the app on or off in both.
@@ -209,25 +262,27 @@ namespace WindowSwitch {
         int MaximumOffset { get { return Math.Max(0, Rows.Count * RowHeight - ClientSize.Height); } }
         public AppList() { DoubleBuffered = true; AutoScroll = false; Dock = DockStyle.Fill; TabStop = true; BackColor = Theme.Current.Surface; AppIcons.Changed += IconsChanged; }
         void IconsChanged(object sender, EventArgs e) { if (IsHandleCreated && !IsDisposed) try { BeginInvoke(new Action(Invalidate)); } catch (InvalidOperationException) { } }
-        public void SetRows(List<HintRow> rows) { Rows = rows; selected = Math.Min(selected, rows.Count - 1); offset = Math.Min(offset, MaximumOffset); Invalidate(); }
+        public void SetRows(List<HintRow> rows) { Rows = rows; selected = Math.Min(selected, rows.Count - 1); if (highlight >= rows.Count) highlight = -1; offset = Math.Min(offset, MaximumOffset); Invalidate(); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); offset = Math.Min(offset, MaximumOffset); }
         protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(Overlay ? Theme.Current.OverlayBackground : Theme.Current.Surface); }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e); var p = Theme.Current; float scale = DeviceDpi / 96f; int width = ClientSize.Width - (Scrollable ? (int)(10 * scale) : 0);
             if (Rows.Count == 0 && !Overlay) TextRenderer.DrawText(e.Graphics, "还没有应用", Font, ClientRectangle, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            int nameColumn = Overlay ? RowPainter.OverlayNameColumn(e.Graphics, Rows, Font, scale) : 0;
             for (int i = 0; i < Rows.Count; i++) {
                 var rect = new Rectangle(0, -offset + i * RowHeight, width, RowHeight); if (!rect.IntersectsWith(e.ClipRectangle)) continue;
                 bool lifted = reordering && i == reorderAt; var plate = Rectangle.Inflate(rect, -(int)(4 * scale), -(int)(3 * scale));
+                if (Overlay && i == highlight) Theme.Fill(e.Graphics, plate, p.Selection, (int)(Theme.SmallRadius * scale));
                 if (!Overlay && (i == selected || i == hovered || lifted)) Theme.Fill(e.Graphics, plate, lifted || i == selected ? p.Selection : p.Hover, (int)(Theme.SmallRadius * scale));
                 if (lifted) using (var pen = new Pen(p.Focus)) using (var path = Theme.Round(new RectangleF(plate.X + .5f, plate.Y + .5f, plate.Width - 1, plate.Height - 1), (int)(Theme.SmallRadius * scale))) e.Graphics.DrawPath(pen, path);
-                zones[i] = RowPainter.Draw(e.Graphics, rect, Rows[i], Font, scale, Overlay, i == hovered && !reordering && i != quietIndex ? hoverPart : RowHover.None);
+                zones[i] = RowPainter.Draw(e.Graphics, rect, Rows[i], Font, scale, Overlay, i == hovered && !reordering && i != quietIndex ? hoverPart : RowHover.None, nameColumn);
                 // A faint grip on the hovered (or lifted) row hints that rows can be dragged.
                 if (!Overlay && Rows.Count > 1 && (lifted || (!reordering && i == hovered))) {
                     float step = 4.5f * scale, r = 1.3f * scale, cx = 8 * scale, cy = rect.Y + rect.Height / 2f;
                     using (var brush = new SolidBrush(lifted ? p.SecondaryText : p.MutedText))
                         for (int row = -1; row <= 1; row++) for (int col = 0; col < 2; col++) e.Graphics.FillEllipse(brush, cx + (col - .5f) * step - r, cy + row * step - r, r * 2, r * 2);
                 }
-                if (i < Rows.Count - 1) using (var pen = new Pen(Overlay ? Theme.Current.OverlayBorder : p.Divider)) e.Graphics.DrawLine(pen, (int)(16 * scale), rect.Bottom - 1, width - (int)(16 * scale), rect.Bottom - 1);
+                if (i < Rows.Count - 1) using (var pen = new Pen(Overlay ? Theme.Current.OverlayBorder : p.Divider)) e.Graphics.DrawLine(pen, (int)(16 * scale), rect.Bottom - 1, width - (int)((Overlay ? 10 : 16) * scale), rect.Bottom - 1);
             }
             if (Scrollable) { int thumbH = Math.Max((int)(24 * scale), ClientSize.Height * ClientSize.Height / (Rows.Count * RowHeight)); int y = offset * Math.Max(1, ClientSize.Height - thumbH) / Math.Max(1, MaximumOffset); Theme.Fill(e.Graphics, new Rectangle(ClientSize.Width - (int)(6 * scale), y, Math.Max(3, (int)(3 * scale)), thumbH), p.Border, (int)(3 * scale)); }
         }
