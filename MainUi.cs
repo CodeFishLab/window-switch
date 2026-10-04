@@ -42,8 +42,8 @@ namespace WindowSwitch {
             openApp.View.Margin = new Padding(0, 0, 16, 16); grid.Controls.Add(openApp.View, 0, 0);
             minimizeSetting.View.Margin = new Padding(12, 0, 0, 16); grid.Controls.Add(minimizeSetting.View, 1, 0);
             var hint = Ui.Table(); hint.Margin = new Padding(0, 0, 16, 0); Ui.Row(hint, Ui.Label("快捷键预览")); Ui.Row(hint, hintCaption);
-            var buttons = Ui.Flow(); buttons.WrapContents = false; Button customize = Ui.Button("设置查看键"), preview = Ui.Button("预览"); buttons.Controls.Add(customize); buttons.Controls.Add(preview); Ui.Row(hint, buttons);
-            customize.Click += delegate { SetHintOptions(); }; preview.Click += delegate { hints.ShowPreview(); note.Text = settings.Applications.Count == 0 ? "请先添加一个应用" : ""; }; grid.Controls.Add(hint, 0, 1);
+            var buttons = Ui.Flow(); buttons.WrapContents = false; Button customize = Ui.Button("设置查看键"); buttons.Controls.Add(customize); Ui.Row(hint, buttons);
+            customize.Click += delegate { SetHintOptions(); }; grid.Controls.Add(hint, 0, 1);
             var prefs = Ui.Table(); prefs.Margin = new Padding(12, 0, 0, 0);
             themeChoice.Items.AddRange(new[] { "跟随系统", "亮色", "暗色" }); themeChoice.SelectedIndex = (int)settings.Theme; themeChoice.AccessibleName = "主题";
             themeChoice.SelectedIndexChanged += delegate { if (!refreshing) ChangeTheme((ThemeMode)themeChoice.SelectedIndex); };
@@ -101,7 +101,7 @@ namespace WindowSwitch {
             OpenSheet(next, index, delegate { UpdateRules(next.Rule, at()); });
         }
         void SetHintOptions() {
-            var next = new HintEditor(settings.Hint);
+            var next = new HintEditor(settings.Hint); next.PreviewRequested += (option, ms) => { hints.Sample(option, ms); note.Text = settings.Applications.Count == 0 ? "请先添加一个应用" : ""; };
             OpenSheet(next, -1, delegate { var proposed = CopySettings(); proposed.Hint = next.Options; if (SaveSettings(proposed)) UpdateHintCaption(); });
         }
         void OpenSheet(SheetPanel next, int index, Action saved) {

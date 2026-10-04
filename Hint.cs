@@ -9,7 +9,11 @@ namespace WindowSwitch {
         public bool Enabled { get; set; }
         public int Key { get; set; }
         public int DelayMs { get; set; }
-        public HintOptions() { Enabled = true; Key = 0xA3; DelayMs = 650; }
+        // Where the preview sits: an OverlayLayout.Positions index (紧贴 / 适中 / 较高 / 居中).
+        public int Position { get; set; }
+        // Which screen: the one with the active window (default) or the one with the pointer.
+        public bool FollowMouse { get; set; }
+        public HintOptions() { Enabled = true; Key = 0xA3; DelayMs = 650; Position = OverlayLayout.DefaultPosition; }
     }
     // Pure state machine: holding a key after a chord never opens the overlay.
     public class HoldState {
@@ -27,10 +31,16 @@ namespace WindowSwitch {
     public enum OverlayDisplayReason { None, Hold, ManualPreview, TrayPreview }
     public static class OverlayLayout {
         // Screen rectangles are physical pixels. The card dimensions below are 96-DPI logical pixels.
-        public static Rectangle Calculate(Rectangle work, int dpi, int count, int logicalWidth = 500) {
-            float scale = dpi / 96f; int edge = (int)(16 * scale), width = Math.Min((int)(logicalWidth * scale), Math.Max(1, work.Width - edge * 2));
+        // Distance above the taskbar (work-area bottom) in logical pixels; the last position centres the preview.
+        public static readonly string[] Positions = { "紧贴", "适中", "较高", "居中" };
+        static readonly int[] gaps = { 12, 28, 56 };
+        public const int DefaultPosition = 1;
+        public static Rectangle Calculate(Rectangle work, int dpi, int count, int logicalWidth = 500, int position = DefaultPosition) {
+            float scale = dpi / 96f; int edge = (int)(12 * scale), width = Math.Min((int)(logicalWidth * scale), Math.Max(1, work.Width - edge * 2));
             int height = Math.Min((int)(Math.Max(1, count) * 56 * scale + 24 * scale), Math.Max(1, Math.Min((int)(work.Height * .6), work.Height - edge * 2)));
-            int gap = (int)(56 * scale), x = work.Left + (work.Width - width) / 2, y = work.Bottom - gap - height;
+            if (position < 0 || position >= Positions.Length) position = DefaultPosition;
+            int x = work.Left + (work.Width - width) / 2;
+            int y = position < gaps.Length ? work.Bottom - (int)(gaps[position] * scale) - height : work.Top + (work.Height - height) / 2;
             y = Math.Max(work.Top + edge, Math.Min(y, work.Bottom - height - edge));
             return new Rectangle(x, y, width, height);
         }
@@ -94,12 +104,15 @@ namespace WindowSwitch {
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); if (NativeStyle.SystemCorners) return; e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using (var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)(Theme.LargeRadius * DeviceDpi / 96f))) using (var pen = new Pen(Theme.Current.OverlayBorder)) e.Graphics.DrawPath(pen, path); }
         public void Present(List<HintRow> rows, HintOptions options) {
             if (rows.Count == 0) { Hide(); return; }
-            IntPtr foreground = Native.GetForegroundWindow(); Screen screen = foreground != IntPtr.Zero ? Screen.FromHandle(foreground) : Screen.FromPoint(Cursor.Position);
-            Rectangle area = screen.WorkingArea; int dpi = foreground == IntPtr.Zero ? DeviceDpi : (int)NativeStyle.Dpi(foreground);
-            Rectangle rect = OverlayLayout.Calculate(area, dpi, rows.Count);
+            // The desktop itself spans every screen, so with nothing but the desktop active the pointer decides too.
+            IntPtr foreground = Native.GetForegroundWindow(); string cls = foreground == IntPtr.Zero ? "" : WindowIdentity.ClassName(foreground);
+            bool byWindow = !options.FollowMouse && foreground != IntPtr.Zero && cls != "Progman" && cls != "WorkerW";
+            Screen screen = byWindow ? Screen.FromHandle(foreground) : Screen.FromPoint(Cursor.Position);
+            Rectangle area = screen.WorkingArea; int dpi = byWindow ? (int)NativeStyle.Dpi(foreground) : DeviceDpi;
+            Rectangle rect = OverlayLayout.Calculate(area, dpi, rows.Count, 500, options.Position);
             Native.SetWindowPos(Handle, new IntPtr(-1), rect.X, rect.Y, rect.Width, rect.Height, 0x10);
             UpdateSurface(); list.SetRows(rows); Show();
-            rect = OverlayLayout.Calculate(area, DeviceDpi, rows.Count);
+            rect = OverlayLayout.Calculate(area, DeviceDpi, rows.Count, 500, options.Position);
             Native.SetWindowPos(Handle, new IntPtr(-1), rect.X, rect.Y, rect.Width, rect.Height, 0x10 | 0x40); PerformLayout(); list.SetRows(rows); RoundRegion();
         }
     }
@@ -141,13 +154,16 @@ namespace WindowSwitch {
         // Once the pointer has moved onto the visible preview (e.g. towards the gear), it stays until the pointer leaves,
         // even after the hold key is released. A pointer that merely happened to be there when it appeared does not count.
         bool PointerResting() { if (!Visible) return false; var at = Cursor.Position; return at != shownAt && overlay.Bounds.Contains(at); }
+        // A short look at the preview while its settings are being edited (hotkeys are suspended meanwhile).
+        DateTime sampleUntil;
+        public void Sample(HintOptions option, int ms) { sampleUntil = manualUntil = DateTime.UtcNow.AddMilliseconds(ms); Present(OverlayDisplayReason.ManualPreview, option); }
         public void Suspend(bool value) { suspended = value; state.Reset(); if (value) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         public void Interrupt() { state.Block(); if (Reason == OverlayDisplayReason.Hold) { Reason = OverlayDisplayReason.None; if (overlay != null) overlay.Hide(); } }
         static bool Down(int key) { return (Native.GetAsyncKeyState(key) & 0x8000) != 0; }
         void Tick() {
             LastTick = Environment.TickCount;
             HintOptions option = options();
-            if (suspended) { state.Reset(); if (overlay != null) overlay.Hide(); return; }
+            if (suspended) { state.Reset(); if (DateTime.UtcNow < sampleUntil || PointerResting()) return; if (overlay != null) overlay.Hide(); return; }
             // Manual previews have a single renewable deadline and do not depend on the hold key.
             if (Reason == OverlayDisplayReason.ManualPreview || Reason == OverlayDisplayReason.TrayPreview) {
                 if (DateTime.UtcNow < manualUntil || PointerResting()) return;
@@ -176,6 +192,12 @@ namespace WindowSwitch {
         readonly SegmentedControl delay = new SegmentedControl { AccessibleName = "长按时间" };
         readonly TextField customDelay = new TextField();
         readonly Toggle enabled = new Toggle { AccessibleName = "启用长按查看" };
+        readonly SegmentedControl position = new SegmentedControl { AccessibleName = "预览位置" };
+        readonly SegmentedControl screenChoice = new SegmentedControl { AccessibleName = "显示在哪个屏幕" };
+        // Shows the preview with the sheet's current (unsaved) choices for the given milliseconds.
+        public event Action<HintOptions, int> PreviewRequested;
+        HintOptions Draft() { return new HintOptions { Enabled = true, Key = keyBox.KeyCode, DelayMs = MinDelay, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1 }; }
+        void RequestPreview(int ms) { if (PreviewRequested != null) PreviewRequested(Draft(), ms); }
         static readonly int[] presets = { 250, 350, 500, 800 };
         public const int MinDelay = 250, MaxDelay = 3000;
         public HintOptions Options;
@@ -196,6 +218,15 @@ namespace WindowSwitch {
             customDelay.Dock = DockStyle.Fill; customDelay.Margin = Padding.Empty; custom.Controls.Add(customDelay, 0, 0);
             var unit = Ui.Label("毫秒"); unit.Dock = DockStyle.None; unit.Anchor = AnchorStyles.Left; unit.Margin = new Padding(10, 0, 0, 0); custom.Controls.Add(unit, 1, 0);
             custom.Visible = delay.SelectedIndex == presets.Length; Ui.Row(Content, custom);
+            // Picking a position shows the preview there at once.
+            foreach (string name in OverlayLayout.Positions) position.Items.Add(name);
+            position.SelectedIndex = current.Position >= 0 && current.Position < OverlayLayout.Positions.Length ? current.Position : OverlayLayout.DefaultPosition;
+            var where = Ui.Label("预览位置"); where.Margin = new Padding(0, 16, 0, 6); Ui.Row(Content, where);
+            position.Dock = DockStyle.None; position.Anchor = AnchorStyles.Left; position.Margin = Padding.Empty; Ui.Row(Content, position);
+            screenChoice.Items.Add("跟随当前窗口"); screenChoice.Items.Add("跟随鼠标"); screenChoice.SelectedIndex = current.FollowMouse ? 1 : 0;
+            screenChoice.Dock = DockStyle.None; screenChoice.Anchor = AnchorStyles.Left; screenChoice.Margin = new Padding(0, 10, 0, 0); Ui.Row(Content, screenChoice);
+            position.SelectedIndexChanged += delegate { RequestPreview(1600); }; screenChoice.SelectedIndexChanged += delegate { RequestPreview(1600); };
+            var preview = Ui.Button("预览"); preview.MinimumSize = new Size(64, 34); preview.Click += delegate { RequestPreview(5000); }; Footer.SetLeading(preview);
             var spacer = new Panel { Height = 14, Margin = Padding.Empty, Dock = DockStyle.Top }; Ui.Row(Content, spacer);
             delay.SelectedIndexChanged += delegate {
                 custom.Visible = delay.SelectedIndex == presets.Length; Error.Text = "";
@@ -209,7 +240,7 @@ namespace WindowSwitch {
             int ms;
             if (delay.SelectedIndex < presets.Length) ms = presets[Math.Max(0, delay.SelectedIndex)];
             else if (!int.TryParse(customDelay.Text.Trim(), out ms) || ms < MinDelay || ms > MaxDelay) { Error.Text = "长按时间需在 " + MinDelay + "–" + MaxDelay + " 毫秒之间。"; customDelay.Box.Focus(); customDelay.Box.SelectAll(); return; }
-            Options = new HintOptions { Enabled = enabled.Checked, Key = keyBox.KeyCode, DelayMs = ms }; RaiseSaved();
+            Options = new HintOptions { Enabled = enabled.Checked, Key = keyBox.KeyCode, DelayMs = ms, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1 }; RaiseSaved();
         }
     }
 }
