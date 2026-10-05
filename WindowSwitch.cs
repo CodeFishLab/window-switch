@@ -483,7 +483,8 @@ namespace WindowSwitch {
             if (paused) note.Text = ""; // shown top right and on the 恢复快捷键 button already
             else if (hotkeys.AppCount < settings.Applications.Count(a => a.Enabled) || (settings.Minimize.Enabled && hotkeys.MinimizeState != "已生效") || (settings.OpenApp.Enabled && hotkeys.OpenAppState != "已生效") || (settings.MoveScreen.Enabled && hotkeys.MoveScreenState != "已生效")) note.Text = "部分快捷键被其他程序占用";
         }
-        void RefreshRows() { list.SetRows(HintRows()); summary.Text = paused ? "快捷键已暂停" : hotkeys.AppCount + " 个快捷键已生效"; if (hints != null) hints.Refresh(); }
+        // While paused the summary stays empty: the pause pill under it already says so.
+        void RefreshRows() { list.SetRows(HintRows()); summary.Text = paused ? "" : hotkeys.AppCount + " 个快捷键已生效"; AlignPauseSwitch(); if (hints != null) hints.Refresh(); }
         // The status pill (in the list and in the preview) is the app's 启用 switch: the change is saved like an edit.
         // Switching back on can fail validation (another app now uses the same key); the app then stays off and says why.
         void ToggleRuleEnabled(AppRule rule) {

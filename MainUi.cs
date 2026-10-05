@@ -51,9 +51,9 @@ namespace WindowSwitch {
             var tools = Ui.Flow(); tools.WrapContents = false;
             AddButton(tools, "＋ 添加应用", true, delegate { if (LeaveSheet()) OpenRuleDialog(-1); });
             // Rows open in the sheet with a single click; 测试 and 移除 live in that sheet, 重试 in the tray menu.
-            // 暂停快捷键 sits under the summary on the right (the same switch as the tray menu item); not saved.
-            pauseButton = Ui.Button("暂停快捷键"); pauseButton.Anchor = AnchorStyles.Right; pauseButton.Margin = Padding.Empty; pauseButton.Click += delegate { SetPaused(!paused); };
-            toolbar.Controls.Add(tools, 0, 0); toolbar.Controls.Add(pauseButton, 1, 0);
+            // The pause switch (a status pill) sits under the summary on the right (the same switch as the tray menu item); not saved.
+            pauseSwitch.Anchor = AnchorStyles.Right; pauseSwitch.Margin = Padding.Empty; pauseSwitch.Click += delegate { SetPaused(!paused); };
+            toolbar.Controls.Add(tools, 0, 0); toolbar.Controls.Add(pauseSwitch, 1, 0);
             Ui.Row(root, toolbar);
             var listSurface = new Card { Dock = DockStyle.Fill, Padding = new Padding(4), Margin = Padding.Empty };
             // Dragging a row reorders the apps (hotkeys, preview and list follow the new order).
@@ -69,6 +69,7 @@ namespace WindowSwitch {
                 if (!LeaveSheet()) { switching = true; list.SelectedIndex = editorIndex; switching = false; return; }
                 OpenRuleDialog(picked);
             }; listSurface.Controls.Add(list); Ui.Row(root, listSurface, true);
+            list.Resize += delegate { AlignPauseSwitch(); };
             settingsCard = new Card { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(16), Margin = new Padding(0, 16, 0, 0) };
             var grid = Ui.Table(2); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             grid.RowStyles.Add(new RowStyle(SizeType.AutoSize)); grid.RowCount = 1;
@@ -137,10 +138,16 @@ namespace WindowSwitch {
         }
         static Button AddButton(FlowLayoutPanel panel, string text, bool primary, EventHandler action) { var button = Ui.Button(text, primary); button.Click += action; panel.Controls.Add(button); return button; }
         // All shortcuts off for now (games, recording...): the main window button and the tray menu item stay in step.
-        Button pauseButton; ToolStripMenuItem pauseItem;
+        readonly PauseSwitch pauseSwitch = new PauseSwitch(); ToolStripMenuItem pauseItem;
+        // The pause pill ends where the list's rows (their highlight plates) end, scrollbar lane included.
+        void AlignPauseSwitch() {
+            var card = list.Parent; if (card == null) return;
+            int inset = card.Padding.Right + (list.Width - list.ClientSize.Width) + list.RowInset;
+            if (pauseSwitch.Margin.Right != inset) pauseSwitch.Margin = new Padding(0, 0, inset, 0);
+        }
         void SetPaused(bool on) {
             if (paused == on) return;
-            paused = on; pauseButton.Text = on ? "恢复快捷键" : "暂停快捷键"; if (pauseItem != null) pauseItem.Checked = on;
+            paused = on; pauseSwitch.Paused = on; if (pauseItem != null) pauseItem.Checked = on;
             RegisterRules();
         }
         void ChangeStartup(bool enable) { try { SetStartup(enable); } catch (Exception ex) { note.Text = "启动设置失败：" + ex.Message; } refreshing = true; startup.Checked = IsStartupEnabled(); refreshing = false; }

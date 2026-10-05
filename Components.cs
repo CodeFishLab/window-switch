@@ -271,6 +271,49 @@ namespace WindowSwitch {
             return zones;
         }
     }
+    // The main window's pause switch, drawn like the rows' status pill: "● 快捷键启用中" (green dot) or "○ 快捷键已暂停"
+    // (hollow ring, as paused rows show it). With the pointer on it, it names what a click does (暂停快捷键 / 恢复快捷键);
+    // right after a click it shows the new state until the pointer leaves. One width for all four texts, so it never jumps.
+    public sealed class PauseSwitch : Control {
+        static readonly string[] Texts = { "快捷键启用中", "快捷键已暂停", "暂停快捷键", "恢复快捷键" };
+        bool paused, hover, quiet;
+        public PauseSwitch() {
+            SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+            AutoSize = true; TabStop = true; Cursor = Cursors.Hand; BackColor = Color.Transparent; AccessibleRole = AccessibleRole.PushButton; AccessibleName = "暂停快捷键";
+        }
+        public bool Paused { get { return paused; } set { if (paused == value) return; paused = value; AccessibleName = value ? "恢复快捷键" : "暂停快捷键"; Invalidate(); } }
+        // A step larger than the rows' pills: it is the window's own state, sitting on the window background.
+        Font Small() { return new Font(Font.FontFamily, Font.Size * .94f); }
+        public override Size GetPreferredSize(Size proposedSize) {
+            using (var small = Small()) {
+                int w = 0; foreach (string text in Texts) w = Math.Max(w, TextRenderer.MeasureText(text, small).Width);
+                return new Size(w + Dpi.Px(this, 40), Font.Height + Dpi.Px(this, 14));
+            }
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = quiet = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnClick(EventArgs e) { quiet = true; base.OnClick(e); Invalidate(); }
+        protected override void OnKeyUp(KeyEventArgs e) { if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) OnClick(EventArgs.Empty); base.OnKeyUp(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnPaint(PaintEventArgs e) {
+            var p = Theme.Current; var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; float scale = Dpi.Scale(this);
+            var pill = new Rectangle(0, 0, Width - 1, Height - 1); int radius = pill.Height / 2;
+            using (var small = Small()) {
+                if (hover && !quiet) {
+                    Theme.Fill(g, pill, p.Pressed, radius);
+                    TextRenderer.DrawText(g, paused ? "恢复快捷键" : "暂停快捷键", small, pill, p.PrimaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                } else {
+                    Color fg = paused ? p.SecondaryText : p.SuccessForeground; int dot = (int)(6 * scale), x = (int)(14 * scale), y = (pill.Height - dot) / 2;
+                    Theme.Fill(g, pill, paused ? p.SecondaryButtonBackground : p.SuccessBackground, radius);
+                    if (paused) { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(fg, w)) g.DrawEllipse(pen, x + w / 2, y + w / 2, dot - w, dot - w); }
+                    else using (var b = new SolidBrush(p.StatusDot)) g.FillEllipse(b, x, y, dot, dot);
+                    TextRenderer.DrawText(g, paused ? "快捷键已暂停" : "快捷键启用中", small, new Rectangle(x + dot, 0, pill.Width - x - dot, pill.Height), fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                }
+            }
+            if (Focused && ShowFocusCues) Dpi.FocusRing(g, this, radius);
+        }
+    }
     public class AppList : ScrollableControl {
         public List<HintRow> Rows = new List<HintRow>();
         public bool Overlay;
@@ -305,6 +348,8 @@ namespace WindowSwitch {
         int IndexAt(int y) { int index = (y + offset) / RowHeight; return y >= 0 && index < Rows.Count ? index : -1; }
         public int SelectedIndex { get { return selected; } set { selected = value; Invalidate(); if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty); } }
         public int RowHeight { get { return (int)((Overlay ? 56 : 58) * DeviceDpi / 96f); } }
+        // How far the rows' highlight plates end in from the list's right edge (plate inset, plus the scrollbar lane when shown).
+        public int RowInset { get { float scale = DeviceDpi / 96f; return (int)(4 * scale) + (Scrollable ? (int)(10 * scale) : 0); } }
         public bool Scrollable { get { return Rows.Count * RowHeight > ClientSize.Height; } }
         int MaximumOffset { get { return Math.Max(0, Rows.Count * RowHeight - ClientSize.Height); } }
         // Pills and badges are right-aligned: the whole list repaints when its width changes.
