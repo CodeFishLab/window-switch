@@ -36,6 +36,12 @@ namespace WindowSwitch {
         public bool HideInPreview { get; set; }
         // The preview shows this app's keys without "Left"/"Right" (the main list keeps them).
         public bool HideSidesInPreview { get; set; }
+        // Which of this app's shortcuts the hold preview shows (the eyes in the editor); null = the first one only.
+        public List<string> PreviewShortcuts { get; set; }
+        // Pressing the shortcut while the app is in front: 0 = minimize it, 1 = close the window (like its ✕).
+        public int PressAgain { get; set; }
+        // 随鼠标换屏 for this app: 0 = follow the main switch, 1 = always, 2 = never.
+        public int ScreenMode { get; set; }
         public AppRule() { Enabled = true; Arguments = ""; TitleContains = ""; TargetId = Guid.NewGuid().ToString("N"); MoreShortcuts = new List<string>(); }
         public IEnumerable<string> AllShortcuts() {
             if (!string.IsNullOrWhiteSpace(Shortcut)) yield return Shortcut;
@@ -50,9 +56,17 @@ namespace WindowSwitch {
         public GlobalShortcut Minimize { get; set; }
         // Shows (or, when already in front, hides) the Window Switch window. Off until the user sets it.
         public GlobalShortcut OpenApp { get; set; }
+        // 快速切屏: moves the active window to the monitor with the mouse pointer (off until a key is set).
+        public GlobalShortcut MoveScreen { get; set; }
         // Without a tray icon the window is reopened with the open-window shortcut, the preview's gear, or by running the exe again.
         public bool ShowTrayIcon { get; set; }
-        public Settings() { Version = 2; Applications = new List<AppRule>(); Hint = new HintOptions(); Minimize = new GlobalShortcut(); OpenApp = new GlobalShortcut { Enabled = false }; ShowTrayIcon = true; }
+        // Esc within this many milliseconds after a switch minimizes the window that was just brought up (0 = off).
+        public int UndoMs { get; set; }
+        // 随鼠标换屏: a window brought up by a switch moves to the monitor with the mouse pointer (apps may override).
+        public bool FollowPointerScreen { get; set; }
+        // 连续双击放大: pressing an app's shortcut twice quickly maximizes its window (again: restores it).
+        public bool DoubleTapMaximize { get; set; }
+        public Settings() { Version = 2; Applications = new List<AppRule>(); Hint = new HintOptions(); Minimize = new GlobalShortcut(); OpenApp = GlobalShortcut.Unset(); MoveScreen = GlobalShortcut.Unset(); ShowTrayIcon = true; UndoMs = 500; }
     }
     public class KeyChord {
         public uint Modifiers, Key;
@@ -130,6 +144,13 @@ namespace WindowSwitch {
         [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr param);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+        [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] public struct WINDOWPLACEMENT { public int length, flags, showCmd; public POINT ptMinPosition, ptMaxPosition; public RECT rcNormalPosition; }
+        [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT placement);
+        [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool SetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT placement);
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
@@ -172,12 +193,91 @@ namespace WindowSwitch {
         readonly Dictionary<string, Timer> pending = new Dictionary<string, Timer>();
         readonly Dictionary<string, DateTime> lastPress = new Dictionary<string, DateTime>();
         public Action<string, string> Report;
+        // A window this engine just brought to the front (IntPtr.Zero after a minimize): Esc may undo it for a moment.
+        public Action<IntPtr> Activated;
+        // Esc right after a wrong switch: put the window that was just brought up away again.
+        public void Undo(IntPtr hwnd) { if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return; Native.ShowWindowAsync(hwnd, 6); recentId = null; }
         public readonly WindowTargetResolver Resolver = new WindowTargetResolver();
         public IntPtr Find(AppRule rule) {
             return Resolver.Find(rule);
         }
         void Log(AppRule rule, string action) { if (Report != null) Report(rule.Name, action); }
+        // 随鼠标换屏: whether this app's window should come up on the pointer's monitor; where the pointer is.
+        public Func<AppRule, bool> MoveToPointerScreen;
+        public Func<Point> PointerPosition = () => Cursor.Position;
+        // Moves the window (its restored rectangle) onto the pointer's monitor, keeping its size and relative place.
+        // maximize: null keeps its state (a maximized window ends up maximized there; a minimized one is restored
+        // there by the caller), true / false ends it maximized / at its normal size there (a double press).
+        // Returns false when it is already on that monitor (or cannot be placed): nothing was done.
+        bool MoveToPointer(IntPtr hwnd, bool? maximize = null) { return MoveToScreen(hwnd, Screen.FromPoint(PointerPosition()), maximize); }
+        // 快速切屏: the active window goes to the pointer's monitor; when it is already there, to the next monitor in
+        // physical order (left to right, then top to bottom), wrapping from the last back to the first.
+        public void MoveForegroundToPointer(IntPtr excluded) {
+            IntPtr target = Native.GetForegroundWindow();
+            if (target == IntPtr.Zero || target == excluded || !WindowIdentity.Eligible(target) || Native.IsHungAppWindow(target)) return;
+            Screen from = Screen.FromHandle(target), to = Screen.FromPoint(PointerPosition());
+            if (to.DeviceName == from.DeviceName) {
+                var all = Screen.AllScreens.Select(sc => Screen.FromPoint(new Point(sc.Bounds.Left + sc.Bounds.Width / 2, sc.Bounds.Top + sc.Bounds.Height / 2))) // fresh (DPI-correct) bounds
+                    .OrderBy(sc => sc.Bounds.Left).ThenBy(sc => sc.Bounds.Top).ToList();
+                if (all.Count < 2) return;
+                int at = all.FindIndex(sc => sc.DeviceName == from.DeviceName); to = all[(at + 1) % all.Count];
+            }
+            try { if (MoveToScreen(target, to, null) && Report != null) Report("当前窗口", "已移到另一块屏幕"); } catch { }
+        }
+        bool MoveToScreen(IntPtr hwnd, Screen to, bool? maximize) {
+            Screen from = Screen.FromHandle(hwnd);
+            if (to.DeviceName == from.DeviceName) return false;
+            var wp = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(Native.WINDOWPLACEMENT)) };
+            if (!Native.GetWindowPlacement(hwnd, ref wp)) return false;
+            // rcNormalPosition is in workspace coordinates: relative to the primary monitor's work area.
+            Point origin = Screen.PrimaryScreen.WorkingArea.Location; var r = wp.rcNormalPosition;
+            Rectangle normal = Rectangle.FromLTRB(r.Left + origin.X, r.Top + origin.Y, r.Right + origin.X, r.Bottom + origin.Y);
+            Rectangle a = from.WorkingArea, b = to.WorkingArea;
+            int width = Math.Min(normal.Width, b.Width), height = Math.Min(normal.Height, b.Height);
+            // Same relative place: the window's free room on the old monitor maps onto the free room on the new one.
+            int x = b.Left + (int)((normal.Left - a.Left) * (double)Math.Max(0, b.Width - width) / Math.Max(1, a.Width - normal.Width));
+            int y = b.Top + (int)((normal.Top - a.Top) * (double)Math.Max(0, b.Height - height) / Math.Max(1, a.Height - normal.Height));
+            x = Math.Max(b.Left, Math.Min(x, b.Right - width)); y = Math.Max(b.Top, Math.Min(y, b.Bottom - height));
+            wp.rcNormalPosition = new Native.RECT { Left = x - origin.X, Top = y - origin.Y, Right = x + width - origin.X, Bottom = y + height - origin.Y };
+            // Windows only honours a new restored rectangle for a maximized or minimized window once it is shown
+            // normally: so restore it at the new place, then maximize it there if that is how it was.
+            bool maximized = maximize ?? (Native.IsZoomed(hwnd) || (Native.IsIconic(hwnd) && (wp.flags & 0x2) != 0)); // WPF_RESTORETOMAXIMIZED
+            wp.showCmd = 1; wp.flags = 0; // SW_SHOWNORMAL; "restore to maximized" is handled below (with it, the call is refused)
+            if (!Native.SetWindowPlacement(hwnd, ref wp)) return false;
+            // Coming out of maximized, Windows restores to the old rectangle regardless; place it explicitly.
+            Native.SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, 0x4 | 0x10); // SWP_NOZORDER | SWP_NOACTIVATE
+            if (maximized) Native.ShowWindowAsync(hwnd, 3); // SW_SHOWMAXIMIZED, now on the pointer's monitor
+            return true;
+        }
+        // 再次按下时: minimize, or close the window the way its ✕ would (the app decides what that means).
+        void PutAway(AppRule rule, IntPtr hwnd) {
+            recentId = null; if (Activated != null) Activated(IntPtr.Zero);
+            if (!Native.IsWindow(hwnd)) return;
+            if (rule.PressAgain == 1) { Native.PostMessage(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero); Log(rule, "已关闭窗口"); }
+            else { Native.ShowWindowAsync(hwnd, 6); Log(rule, "已最小化"); }
+        }
+        // Was maximized → restored, otherwise → maximized; then to the front. Done directly: BringForward would
+        // restore a minimized window and undo the maximize.
+        void ToggleMaximized(AppRule rule, IntPtr hwnd, bool zoomed) {
+            // 随鼠标换屏 applies here too: maximized (or restored) on the pointer's monitor.
+            bool moved = false;
+            if (MoveToPointerScreen != null && MoveToPointerScreen(rule) && !Native.IsHungAppWindow(hwnd)) try { moved = MoveToPointer(hwnd, !zoomed); } catch { }
+            if (!moved && !zoomed) Native.ShowWindowAsync(hwnd, 3); // SW_SHOWMAXIMIZED
+            else if (!moved) {
+                // Back to the normal size. If the first press already minimized it, a plain restore would bring it back
+                // maximized (Windows remembers "restore to maximized"), so ask for the normal placement explicitly.
+                var wp = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf(typeof(Native.WINDOWPLACEMENT)) };
+                if (!Native.IsHungAppWindow(hwnd) && Native.GetWindowPlacement(hwnd, ref wp)) { wp.showCmd = 1; wp.flags &= ~0x2; Native.SetWindowPlacement(hwnd, ref wp); }
+                else Native.ShowWindowAsync(hwnd, 9);
+            }
+            bool activated = Native.SetForegroundWindow(hwnd) && Native.GetForegroundWindow() == hwnd;
+            if (!activated) ForceForeground(hwnd);
+            recentId = rule.TargetId ?? rule.Name; recentWindow = hwnd; recentAt = Environment.TickCount;
+            Log(rule, zoomed ? "已还原" : "已放大");
+        }
         void BringForward(AppRule rule, IntPtr hwnd) {
+            // A hung app would block the (synchronous) placement call; it is simply not moved.
+            if (MoveToPointerScreen != null && MoveToPointerScreen(rule) && !Native.IsHungAppWindow(hwnd)) try { MoveToPointer(hwnd); } catch { /* moving is a nicety; switching must go on */ }
             if (Native.IsIconic(hwnd)) Native.ShowWindowAsync(hwnd, 9);
             else Native.ShowWindowAsync(hwnd, 5);
             IntPtr target = hwnd;
@@ -187,7 +287,7 @@ namespace WindowSwitch {
             }
             bool activated = Native.SetForegroundWindow(target) && Native.GetForegroundWindow() == target;
             if (!activated) activated = ForceForeground(target);
-            if (activated) { recentId = rule.TargetId ?? rule.Name; recentWindow = hwnd; recentAt = Environment.TickCount; }
+            if (activated) { recentId = rule.TargetId ?? rule.Name; recentWindow = hwnd; recentAt = Environment.TickCount; if (Activated != null) Activated(hwnd); }
             Log(rule, activated ? "已调至前台" : "已恢复窗口；Windows 暂未允许前置，请再按一次快捷键");
         }
         // When Windows refuses a plain SetForegroundWindow (foreground lock), sharing the current foreground thread's
@@ -205,18 +305,34 @@ namespace WindowSwitch {
         public void Toggle(AppRule rule) { Run(rule, true); }
         // Clicking an app in the preview only ever brings it up (or starts it); it never minimizes it.
         public void Show(AppRule rule) { Run(rule, false); }
+        // 连续双击放大: whether a quick second press maximizes; how quick that is.
+        public Func<bool> DoubleTapMaximize;
+        // Every press acts at once (no waiting for a possible second one), so on a front window the first press of a
+        // double press minimizes it briefly before the second maximizes or restores it.
+        public const int DoubleTapMs = 400;
+        readonly HashSet<string> doubleTapped = new HashSet<string>();
+        // Whether the window was maximized (and up) at an app's last single press: its first press may already have
+        // minimized it, so a double press decides maximize vs restore from how the window looked before it.
+        readonly Dictionary<string, bool> zoomedAtPress = new Dictionary<string, bool>();
         void Run(AppRule rule, bool minimizeIfActive) {
             DateTime previous;
             string id = rule.TargetId ?? rule.Name;
             // Only guards against one press being delivered twice; quick deliberate presses must all count.
-            if (lastPress.TryGetValue(id, out previous) && (DateTime.UtcNow - previous).TotalMilliseconds < 40) return;
+            bool pressedBefore = lastPress.TryGetValue(id, out previous);
+            double since = pressedBefore ? (DateTime.UtcNow - previous).TotalMilliseconds : double.MaxValue;
+            if (since < 40) return;
             lastPress[id] = DateTime.UtcNow;
+            // A quick second shortcut press (not a third one: a double press is used up) maximizes / restores the window.
+            bool doubleTap = minimizeIfActive && since < DoubleTapMs && !doubleTapped.Contains(id) && DoubleTapMaximize != null && DoubleTapMaximize();
+            if (doubleTap) doubleTapped.Add(id); else doubleTapped.Remove(id);
             try {
                 IntPtr hwnd = Find(rule);
+                if (hwnd != IntPtr.Zero && doubleTap) { bool was; ToggleMaximized(rule, hwnd, zoomedAtPress.TryGetValue(id, out was) && was); return; }
+                if (hwnd != IntPtr.Zero) zoomedAtPress[id] = Native.IsZoomed(hwnd) && !Native.IsIconic(hwnd);
                 if (hwnd != IntPtr.Zero) {
                     IntPtr foreground = Native.GetForegroundWindow();
                     if (minimizeIfActive && !Native.IsIconic(hwnd) && (WindowIdentity.SameForeground(hwnd, foreground) || RecentlyActivated(id, hwnd))) {
-                        Native.ShowWindowAsync(hwnd, 6); recentId = null; Log(rule, "已最小化");
+                        PutAway(rule, hwnd);
                     } else BringForward(rule, hwnd);
                     return;
                 }
@@ -252,6 +368,7 @@ namespace WindowSwitch {
     }
     public sealed class Endpoint : NativeWindow, IDisposable {
         public Action<int> Hotkey, Toggle, Navigate;
+        public Action<IntPtr> Undo;
         public Action Open, Quit, Preview, Diagnose, SystemTheme;
         public Endpoint(string title) { CreateHandle(new CreateParams { Caption = title }); }
         protected override void WndProc(ref Message msg) {
@@ -261,6 +378,7 @@ namespace WindowSwitch {
             else if (msg.Msg == 0x8003 && Quit != null) Quit();
             else if (msg.Msg == 0x8004 && Preview != null) Preview();
             else if (msg.Msg == SidedHotkeys.NavigateMessage && Navigate != null) Navigate(msg.WParam.ToInt32());
+            else if (msg.Msg == SidedHotkeys.UndoMessage && Undo != null) Undo(msg.WParam);
             else if (msg.Msg == 0x8005 && Diagnose != null) Diagnose();
             else if (msg.Msg == 0x8006 && SystemTheme != null) SystemTheme();
             base.WndProc(ref msg);
@@ -287,22 +405,31 @@ namespace WindowSwitch {
             tray = new TrayIcon(TrayIcon.ForConfiguration(configPath));
             if (settings.Hint == null) settings.Hint = new HintOptions();
             if (settings.Minimize == null) settings.Minimize = new GlobalShortcut();
-            if (settings.OpenApp == null) settings.OpenApp = new GlobalShortcut { Enabled = false };
+            if (settings.OpenApp == null) settings.OpenApp = GlobalShortcut.Unset();
+            if (settings.MoveScreen == null) settings.MoveScreen = GlobalShortcut.Unset();
+            settings.Minimize.ForgetPlaceholder(); settings.OpenApp.ForgetPlaceholder(); settings.MoveScreen.ForgetPlaceholder();
             Theme.Set(settings.Theme); BuildUi();
             hints = new HintMonitor(() => settings.Hint, delegate { return HintRows().Where(r => !r.Rule.HideInPreview).ToList(); });
             hints.SettingsRequested += delegate { ShowSettings(); };
+            ShortcutRecorder.AnyRecording += RecordingChanged;
             hints.AppRequested += rule => { if (settings.Applications.Contains(rule)) engine.Show(rule); };
+            hints.AppToggleRequested += rule => { if (settings.Applications.Contains(rule)) engine.Toggle(rule); };
             hints.EnabledToggleRequested += ToggleRuleEnabled;
             hints.NavigableChanged += value => { if (hotkeys != null) hotkeys.Navigating = value; };
             endpoint = new Endpoint(endpointTitle); hotkeys = new HotkeyManager(endpoint.Handle);
             endpoint.Hotkey = delegate(int id) {
                 hints.Interrupt();
                 if (id == HotkeyManager.OpenAppId) { if (Visible && WindowState != FormWindowState.Minimized && WindowIdentity.SameForeground(Handle, Native.GetForegroundWindow())) HideToTray(); else ShowSettings(); return; }
+                if (id == HotkeyManager.MoveScreenId) { engine.MoveForegroundToPointer(hints.Overlay == null ? IntPtr.Zero : hints.Overlay.Handle); return; }
                 if (id == HotkeyManager.MinimizeId) { if (Visible && WindowIdentity.SameForeground(Handle, Native.GetForegroundWindow())) HideToTray(); else engine.MinimizeForeground(hints.Overlay == null ? IntPtr.Zero : hints.Overlay.Handle); return; }
                 AppRule rule = hotkeys.Rule(id); if (rule != null) engine.Toggle(rule);
             };
             endpoint.Toggle = delegate(int index) { if (index >= 0 && index < settings.Applications.Count) { hints.Interrupt(); engine.Toggle(settings.Applications[index]); } };
             endpoint.Navigate = key => hints.Navigate(key);
+            endpoint.Undo = hwnd => engine.Undo(hwnd);
+            engine.Activated = hwnd => { if (hotkeys != null) hotkeys.ArmUndo(hwnd, paused ? 0 : settings.UndoMs); };
+            engine.MoveToPointerScreen = rule => rule.ScreenMode == 1 || (rule.ScreenMode == 0 && settings.FollowPointerScreen);
+            engine.DoubleTapMaximize = () => settings.DoubleTapMaximize;
             endpoint.Open = ShowSettings; endpoint.Quit = Quit; endpoint.Preview = delegate { hints.ShowPreview(); }; endpoint.Diagnose = WriteStatus;
             endpoint.SystemTheme = Theme.RefreshSystem;
             engine.Report = delegate(string name, string action) {
@@ -320,9 +447,9 @@ namespace WindowSwitch {
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemThemeChanged;
         }
         void SystemThemeChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e) { if (!IsDisposed && endpoint != null) Native.PostMessage(endpoint.Handle, 0x8006, IntPtr.Zero, IntPtr.Zero); }
-        void UpdateRules(AppRule rule, int index) { var copy = new List<AppRule>(settings.Applications); if (index < 0) copy.Add(rule); else copy[index] = rule; SaveRules(copy); }
-        Settings CopySettings() { return new Settings { Applications = settings.Applications, Hint = settings.Hint, Theme = settings.Theme, Minimize = settings.Minimize, OpenApp = settings.OpenApp, ShowTrayIcon = settings.ShowTrayIcon }; }
-        void SaveRules(List<AppRule> rules) { var proposed = CopySettings(); proposed.Applications = rules; SaveSettings(proposed); }
+        bool UpdateRules(AppRule rule, int index) { var copy = new List<AppRule>(settings.Applications); if (index < 0) copy.Add(rule); else copy[index] = rule; return SaveRules(copy); }
+        Settings CopySettings() { return new Settings { Applications = settings.Applications, Hint = settings.Hint, Theme = settings.Theme, Minimize = settings.Minimize, OpenApp = settings.OpenApp, MoveScreen = settings.MoveScreen, ShowTrayIcon = settings.ShowTrayIcon, UndoMs = settings.UndoMs, FollowPointerScreen = settings.FollowPointerScreen, DoubleTapMaximize = settings.DoubleTapMaximize }; }
+        bool SaveRules(List<AppRule> rules) { var proposed = CopySettings(); proposed.Applications = rules; return SaveSettings(proposed); }
         bool SaveSettings(Settings proposed) {
             try {
                 HotkeyManager.Validate(proposed); proposed.Version = 2;
@@ -353,14 +480,16 @@ namespace WindowSwitch {
         void RegisterRules() {
             if (editing) return; // An open editor or recorder re-registers when it closes.
             hotkeys.Apply(settings, paused); RefreshRows(); RefreshGlobalShortcuts(); WriteStatus();
-            if (paused) note.Text = "快捷键已暂停";
-            else if (hotkeys.AppCount < settings.Applications.Count(a => a.Enabled) || (settings.Minimize.Enabled && hotkeys.MinimizeState != "已生效") || (settings.OpenApp.Enabled && hotkeys.OpenAppState != "已生效")) note.Text = "部分快捷键被其他程序占用";
+            if (paused) note.Text = ""; // shown top right and on the 恢复快捷键 button already
+            else if (hotkeys.AppCount < settings.Applications.Count(a => a.Enabled) || (settings.Minimize.Enabled && hotkeys.MinimizeState != "已生效") || (settings.OpenApp.Enabled && hotkeys.OpenAppState != "已生效") || (settings.MoveScreen.Enabled && hotkeys.MoveScreenState != "已生效")) note.Text = "部分快捷键被其他程序占用";
         }
-        void RefreshRows() { list.SetRows(HintRows()); summary.Text = hotkeys.AppCount + " 个快捷键已生效"; if (hints != null) hints.Refresh(); }
+        // While paused the summary stays empty: the pause pill under it already says so.
+        void RefreshRows() { list.SetRows(HintRows()); summary.Text = paused ? "" : hotkeys.AppCount + " 个快捷键已生效"; AlignPauseSwitch(); if (hints != null) hints.Refresh(); }
         // The status pill (in the list and in the preview) is the app's 启用 switch: the change is saved like an edit.
         // Switching back on can fail validation (another app now uses the same key); the app then stays off and says why.
         void ToggleRuleEnabled(AppRule rule) {
-            int index = settings.Applications.IndexOf(rule); if (index < 0 || editing || paused) return;
+            // The app open in the editor is changed there (the sheet would otherwise save its stale switch back).
+            int index = settings.Applications.IndexOf(rule); if (index < 0 || editing || paused || (sheet != null && editorRule == rule)) return;
             var changed = RuleEditor.Clone(rule); changed.Enabled = !rule.Enabled; UpdateRules(changed, index);
         }
         // Diagnostics only. Resolving each app's window walks every top-level window (hundreds of ms), so the UI
@@ -395,7 +524,7 @@ namespace WindowSwitch {
         void Dismiss() { if (settings.ShowTrayIcon || settings.OpenApp.Enabled) HideToTray(); else WindowState = FormWindowState.Minimized; }
         public void Quit() { exiting = true; Close(); Application.ExitThread(); }
         protected override void Dispose(bool disposing) {
-            if (disposing) { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; retry.Dispose(); hints.Dispose(); hotkeys.Dispose(); engine.Dispose(); tray.Visible = false; tray.Dispose(); endpoint.Dispose(); }
+            if (disposing) { ShortcutRecorder.AnyRecording -= RecordingChanged; Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; retry.Dispose(); hints.Dispose(); hotkeys.Dispose(); engine.Dispose(); tray.Visible = false; tray.Dispose(); endpoint.Dispose(); }
             base.Dispose(disposing);
         }
         static string StartupPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), StartupName + ".lnk"); } }
@@ -435,11 +564,12 @@ namespace WindowSwitch {
             string title = "WindowSwitch.Endpoint." + hash;
             try {
                 // First run (or a fresh copy): start from an empty configuration instead of failing.
-                if (!File.Exists(config)) File.WriteAllText(config, new JavaScriptSerializer().Serialize(new Settings { Minimize = new GlobalShortcut { Enabled = false } }), new UTF8Encoding(false));
+                if (!File.Exists(config)) File.WriteAllText(config, new JavaScriptSerializer().Serialize(new Settings { Minimize = GlobalShortcut.Unset() }), new UTF8Encoding(false));
                 Settings settings = new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(config, Encoding.UTF8));
                 if (settings == null || settings.Version < 1 || settings.Version > 2) throw new ArgumentException("配置版本不受支持。");
                 if (settings.Minimize == null) settings.Minimize = new GlobalShortcut();
-                if (settings.OpenApp == null) settings.OpenApp = new GlobalShortcut { Enabled = false };
+                if (settings.OpenApp == null) settings.OpenApp = GlobalShortcut.Unset();
+                if (settings.MoveScreen == null) settings.MoveScreen = GlobalShortcut.Unset();
                 // Upgrade legacy configurations without changing existing app bindings.
                 if (settings.Version == 1 && settings.Applications.Any(a => a.Enabled && KeyChord.Parse(a.Shortcut).Modifiers == 3 && KeyChord.Parse(a.Shortcut).Key == 77)) settings.Minimize.Enabled = false;
                 HotkeyManager.Validate(settings);

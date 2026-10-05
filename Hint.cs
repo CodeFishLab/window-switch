@@ -13,6 +13,8 @@ namespace WindowSwitch {
         public int Position { get; set; }
         // Which screen: the one with the active window (default) or the one with the pointer.
         public bool FollowMouse { get; set; }
+        // Hold key + numpad 1–9 opens the matching app of the preview (numbered when on). Off unless switched on.
+        public bool NumberKeys { get; set; }
         public HintOptions() { Enabled = true; Key = 0xA3; DelayMs = 650; Position = OverlayLayout.DefaultPosition; }
     }
     // Pure state machine: holding a key after a chord never opens the overlay.
@@ -27,7 +29,8 @@ namespace WindowSwitch {
         public void Block() { down = true; blocked = true; }
         public void Reset() { down = blocked = false; }
     }
-    public class HintRow { public string Name, Shortcut, State; public AppRule Rule; public List<string> Shortcuts; }
+    // Number: the row's numpad digit in the preview (1–9), 0 when numbers are off or past 9.
+    public class HintRow { public string Name, Shortcut, State; public AppRule Rule; public List<string> Shortcuts; public int Number; }
     public enum OverlayDisplayReason { None, Hold, ManualPreview, TrayPreview }
     public static class OverlayLayout {
         // Screen rectangles are physical pixels. The card dimensions below are 96-DPI logical pixels.
@@ -37,7 +40,7 @@ namespace WindowSwitch {
         public const int DefaultPosition = 1;
         public static Rectangle Calculate(Rectangle work, int dpi, int count, int logicalWidth = 500, int position = DefaultPosition) {
             float scale = dpi / 96f; int edge = (int)(12 * scale), width = Math.Min((int)(logicalWidth * scale), Math.Max(1, work.Width - edge * 2));
-            int height = Math.Min((int)(Math.Max(1, count) * 56 * scale + 24 * scale), Math.Max(1, Math.Min((int)(work.Height * .6), work.Height - edge * 2)));
+            int height = Math.Min((int)(Math.Max(1, count) * 56 * scale + 16 * scale), Math.Max(1, Math.Min((int)(work.Height * .6), work.Height - edge * 2)));
             if (position < 0 || position >= Positions.Length) position = DefaultPosition;
             int x = work.Left + (work.Width - width) / 2;
             int y = position < gaps.Length ? work.Bottom - (int)(gaps[position] * scale) - height : work.Top + (work.Height - height) / 2;
@@ -47,22 +50,22 @@ namespace WindowSwitch {
     }
     // Small settings gear in the preview's top-right corner; it opens the Window Switch window.
     sealed class OverlayGear : Control {
-        bool hover; static string iconFont;
+        bool hover;
         public OverlayGear() {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             Cursor = Cursors.Hand; TabStop = false; AccessibleName = "设置"; AccessibleRole = AccessibleRole.PushButton;
         }
-        // The system icon font draws a crisp gear at any DPI (Windows 11: Segoe Fluent Icons, Windows 10: Segoe MDL2 Assets).
-        static string IconFont {
-            get {
-                if (iconFont == null) using (var fonts = new System.Drawing.Text.InstalledFontCollection()) iconFont = fonts.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
-                return iconFont;
-            }
-        }
+        // The list underneath (e.g. the first row's highlight) shows through: only the glyph and its hover disc are the gear's own.
+        public AppList Behind;
         protected override void OnPaint(PaintEventArgs e) {
-            var p = Theme.Current; var g = e.Graphics; g.Clear(p.OverlayBackground); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var p = Theme.Current; var g = e.Graphics; g.Clear(p.OverlayBackground);
+            if (Behind != null && Parent != null) {
+                var at = new Point(Behind.Left - Left, Behind.Top - Top); var state = g.Save();
+                g.TranslateTransform(at.X, at.Y); Behind.RenderBehind(g, new Rectangle(-at.X, -at.Y, Width, Height)); g.Restore(state);
+            }
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             if (hover) Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Hover, Height / 2);
-            using (var font = new Font(IconFont, 9.5f))
+            using (var font = new Font(Dpi.IconFont, 9.5f))
                 TextRenderer.DrawText(g, "", font, ClientRectangle, hover ? p.PrimaryText : p.MutedText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
@@ -79,7 +82,9 @@ namespace WindowSwitch {
             list.TargetClicked += row => { if (AppClicked != null) AppClicked(row); };
             list.StatusClicked += row => { if (SwitchClicked != null) SwitchClicked(row); };
             Text = "WindowSwitch.HintOverlay"; FormBorderStyle = FormBorderStyle.None; ControlBox = false; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-            Padding = new Padding(4, 12, 4, 12); Controls.Add(list); Controls.Add(gear); gear.BringToFront(); ClientSize = new Size(460, 136);
+            // The top edge leaves room for the gear; the bottom only needs a sliver (rows carry their own spacing).
+            Padding = new Padding(4, 12, 4, 4); Controls.Add(list); Controls.Add(gear); gear.BringToFront(); ClientSize = new Size(460, 136);
+            gear.Behind = list; list.Invalidated += delegate { gear.Invalidate(); };
             gear.Click += delegate { if (SettingsRequested != null) SettingsRequested(this, EventArgs.Empty); };
             ResumeLayout(true); UpdateSurface();
         }
@@ -102,8 +107,9 @@ namespace WindowSwitch {
         void UpdateSurface() { BackColor = Theme.Current.OverlayBackground; list.BackColor = BackColor; RoundRegion(); Invalidate(true); }
         protected override void ApplyTheme() { UpdateSurface(); NativeStyle.TitleBar(Handle, Theme.Current.Dark); }
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); if (NativeStyle.SystemCorners) return; e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using (var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)(Theme.LargeRadius * DeviceDpi / 96f))) using (var pen = new Pen(Theme.Current.OverlayBorder)) e.Graphics.DrawPath(pen, path); }
-        // Logical width: 460 (a calm, steady card), growing up to 500 only when names and keys need it.
-        public const int MinWidth = 460, MaxWidth = 500;
+        // Logical width: 460 (a calm, steady card), growing only when names and keys need it (several shortcuts per
+        // app can be shown); past the maximum, extra shortcuts collapse into "+n".
+        public const int MinWidth = 460, MaxWidth = 640;
         int FitWidth(List<HintRow> rows) {
             float scale = DeviceDpi / 96f;
             using (var g = list.CreateGraphics()) {
@@ -148,12 +154,26 @@ namespace WindowSwitch {
         // Clicking an app in the preview opens it (the preview steps aside); its status pill switches it on or off
         // while the preview stays up to show the new state.
         public event Action<AppRule> AppRequested, EnabledToggleRequested;
+        // A numpad digit acts like the app's own shortcut: brings it up, or minimizes it when it is already in front.
+        public event Action<AppRule> AppToggleRequested;
         // True while a hold preview is on screen: ↑ ↓ Enter Esc then steer it (the keyboard hook captures them).
         public event Action<bool> NavigableChanged;
         bool navigable;
         void UpdateNavigable() { bool now = Visible && Reason == OverlayDisplayReason.Hold; if (now == navigable) return; navigable = now; if (NavigableChanged != null) NavigableChanged(now); }
+        // The preview's rows, numbered 1–9 when numpad opening is on.
+        List<HintRow> Rows(HintOptions option) {
+            var list = rows(); if (option != null && option.NumberKeys) for (int i = 0; i < list.Count && i < 9; i++) list[i].Number = i + 1;
+            return list;
+        }
+        // Numpad 1–9 (sent as VK_NUMPAD1–9 by the hook) opens that row's app, with or without the preview on screen;
         // ↑/↓ move a highlight (wrapping), releasing the hold key or Enter opens it, Esc closes the preview.
         public void Navigate(int key) {
+            if (key >= 0x61 && key <= 0x69) {
+                var option = options(); if (suspended || !option.Enabled || !option.NumberKeys) return;
+                var numbered = Rows(option); int index = key - 0x61; if (index >= numbered.Count) return;
+                if (overlay != null) Dismiss(); else state.Block();
+                if (AppToggleRequested != null) AppToggleRequested(numbered[index].Rule); return;
+            }
             if (!Visible || Reason != OverlayDisplayReason.Hold) return;
             var list = overlay.RowList; int n = list.Rows.Count; if (n == 0) return;
             if (key == 0x28) list.Highlight = list.Highlight < 0 ? 0 : (list.Highlight + 1) % n;
@@ -176,8 +196,8 @@ namespace WindowSwitch {
         }
         // The hold key may still be down: blocking the hold state keeps the preview from popping straight back up.
         void Dismiss() { Reason = OverlayDisplayReason.None; overlay.Hide(); state.Block(); }
-        public void Refresh() { if (Visible) overlay.RowList.SetRows(rows()); }
-        void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); Reason = reason; overlay.RowList.Highlight = -1; overlay.Present(rows(), option); shownAt = Cursor.Position; UpdateNavigable(); }
+        public void Refresh() { if (Visible) overlay.RowList.SetRows(Rows(options())); }
+        void Present(OverlayDisplayReason reason, HintOptions option) { EnsureOverlay(); Reason = reason; overlay.RowList.Highlight = -1; overlay.Present(Rows(option), option); shownAt = Cursor.Position; UpdateNavigable(); }
         // Once the pointer has moved onto the visible preview (e.g. towards the gear), it stays until the pointer leaves,
         // even after the hold key is released. A pointer that merely happened to be there when it appeared does not count.
         bool PointerResting() { if (!Visible) return false; var at = Cursor.Position; return at != shownAt && overlay.Bounds.Contains(at); }
@@ -225,11 +245,12 @@ namespace WindowSwitch {
         readonly SegmentedControl delay = new SegmentedControl { AccessibleName = "长按时间" };
         readonly TextField customDelay = new TextField();
         readonly Toggle enabled = new Toggle { AccessibleName = "启用长按查看" };
+        readonly Toggle numbers = new Toggle { AccessibleName = "数字键盘快速打开" };
         readonly SegmentedControl position = new SegmentedControl { AccessibleName = "预览位置" };
         readonly SegmentedControl screenChoice = new SegmentedControl { AccessibleName = "显示在哪个屏幕" };
         // Shows the preview with the sheet's current (unsaved) choices for the given milliseconds.
         public event Action<HintOptions, int> PreviewRequested;
-        HintOptions Draft() { return new HintOptions { Enabled = true, Key = keyBox.KeyCode, DelayMs = MinDelay, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1 }; }
+        HintOptions Draft() { return new HintOptions { Enabled = true, Key = keyBox.KeyCode, DelayMs = MinDelay, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1, NumberKeys = numbers.Checked }; }
         void RequestPreview(int ms) { if (PreviewRequested != null) PreviewRequested(Draft(), ms); }
         static readonly int[] presets = { 250, 350, 500, 800 };
         public const int MinDelay = 250, MaxDelay = 3000;
@@ -244,7 +265,7 @@ namespace WindowSwitch {
             var caption = Ui.Label("长按时间（秒）"); caption.Margin = new Padding(0, 0, 0, 6); Ui.Row(Content, caption);
             delay.Dock = DockStyle.None; delay.Anchor = AnchorStyles.Left; delay.Margin = Padding.Empty; Ui.Row(Content, delay);
             // "自定义" reveals a millisecond field; digits only, checked on save.
-            var custom = Ui.Table(3); custom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120)); custom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); custom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            var custom = Ui.Table(3); custom.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80)); // 250–3000 ms: four digits custom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); custom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             custom.RowStyles.Add(new RowStyle(SizeType.AutoSize)); custom.RowCount = 1; custom.Margin = new Padding(0, 10, 0, 0);
             customDelay.Text = current.DelayMs.ToString(); customDelay.Box.MaxLength = 4; customDelay.Box.AccessibleName = "自定义长按时间（毫秒）";
             customDelay.Box.KeyPress += delegate(object sender, KeyPressEventArgs e) { if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar)) e.Handled = true; };
@@ -265,15 +286,20 @@ namespace WindowSwitch {
                 custom.Visible = delay.SelectedIndex == presets.Length; Error.Text = "";
                 if (custom.Visible) { customDelay.Box.Focus(); customDelay.Box.SelectAll(); }
             };
+            numbers.Checked = current.NumberKeys; numbers.CheckedChanged += delegate { RequestPreview(1600); };
+            Ui.Row(Content, Ui.ToggleRow("数字键盘快速打开", numbers));
             Ui.Row(Content, Ui.ToggleRow("启用长按查看", enabled));
         }
         // Opening on the recorder would start recording at once and hide the current key.
-        public override void FocusFirst() { delay.Focus(); }
+        public override void FocusFirst() { delay.Focus(); initial = Snapshot(); }
+        string initial;
+        string Snapshot() { return string.Join("|", keyBox.KeyCode, delay.SelectedIndex, customDelay.Text.Trim(), position.SelectedIndex, screenChoice.SelectedIndex, enabled.Checked, numbers.Checked); }
+        public override bool HasChanges { get { return initial != null && Snapshot() != initial; } }
         protected override void Save() {
             int ms;
             if (delay.SelectedIndex < presets.Length) ms = presets[Math.Max(0, delay.SelectedIndex)];
             else if (!int.TryParse(customDelay.Text.Trim(), out ms) || ms < MinDelay || ms > MaxDelay) { Error.Text = "长按时间需在 " + MinDelay + "–" + MaxDelay + " 毫秒之间。"; customDelay.Box.Focus(); customDelay.Box.SelectAll(); return; }
-            Options = new HintOptions { Enabled = enabled.Checked, Key = keyBox.KeyCode, DelayMs = ms, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1 }; RaiseSaved();
+            Options = new HintOptions { Enabled = enabled.Checked, Key = keyBox.KeyCode, DelayMs = ms, Position = position.SelectedIndex, FollowMouse = screenChoice.SelectedIndex == 1, NumberKeys = numbers.Checked }; RaiseSaved();
         }
     }
 }

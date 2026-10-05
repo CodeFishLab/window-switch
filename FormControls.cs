@@ -10,6 +10,17 @@ namespace WindowSwitch {
     // never scaled after rendering, and text is drawn with GDI (TextRenderer) at full opacity.
     public static class Dpi {
         public const int FieldHeight = 36, FieldRadius = 10;
+        // The system icon font draws crisp glyphs at any DPI (Windows 11: Segoe Fluent Icons, Windows 10: Segoe MDL2 Assets).
+        static string iconFont;
+        public static string IconFont {
+            get {
+                if (iconFont == null) using (var fonts = new System.Drawing.Text.InstalledFontCollection()) {
+                    iconFont = "Segoe MDL2 Assets";
+                    foreach (var family in fonts.Families) if (family.Name == "Segoe Fluent Icons") { iconFont = family.Name; break; }
+                }
+                return iconFont;
+            }
+        }
         public static float Scale(Control c) { return c.DeviceDpi / 96f; }
         public static int Px(Control c, float logical) { return (int)Math.Round(logical * c.DeviceDpi / 96f); }
         // Fill and stroke share one half-pixel-aligned path so the 1 px border lands on whole device pixels.
@@ -41,6 +52,83 @@ namespace WindowSwitch {
     }
 
     // A borderless TextBox inside a painted Scheme A field: warm surface, hairline border, graphite focus.
+    // A read-only value shown in a field-shaped box (same fill and border as the shortcut fields), centred; clickable.
+    // A short explanation that appears when the pointer rests on a setting's name (Attach). It looks like the other
+    // popovers (rounded, theme surface, border, shadow), never takes focus, and closes as soon as the pointer leaves.
+    public sealed class InfoTip : Form {
+        const int Delay = 250, MaxWidth = 320, PadX = 12, PadY = 9, Gap = 6;
+        readonly string text; readonly Control anchor;
+        InfoTip(Control anchor, string text) {
+            this.anchor = anchor; this.text = text;
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; AutoScaleMode = AutoScaleMode.None;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            Font = anchor.Font; BackColor = Theme.Current.PopoverBackground;
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams { get { var value = base.CreateParams; value.ExStyle |= 0x08000000 | 0x80; value.ClassStyle |= 0x20000; return value; } } // no-activate, tool window, drop shadow
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); NativeStyle.Popup(Handle); }
+        const TextFormatFlags Flags = TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.TextBoxControl;
+        // Sized to the text (wrapping at MaxWidth), placed under the name and kept on its screen.
+        void Place() {
+            int padX = Dpi.Px(anchor, PadX), padY = Dpi.Px(anchor, PadY), gap = Dpi.Px(anchor, Gap);
+            var text = TextRenderer.MeasureText(this.text, Font, new Size(Dpi.Px(anchor, MaxWidth) - padX * 2, int.MaxValue), Flags);
+            var size = new Size(text.Width + padX * 2 + 1, text.Height + padY * 2);
+            var at = anchor.PointToScreen(new Point(0, anchor.Height + gap)); var area = Screen.FromControl(anchor).WorkingArea;
+            if (at.Y + size.Height > area.Bottom) at.Y = anchor.PointToScreen(Point.Empty).Y - gap - size.Height;
+            at.X = Math.Max(area.Left, Math.Min(at.X, area.Right - size.Width));
+            Bounds = new Rectangle(at, size);
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            var p = Theme.Current; e.Graphics.Clear(p.PopoverBackground);
+            if (!NativeStyle.SystemCorners) using (var pen = new Pen(p.Border)) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+            int padX = Dpi.Px(anchor, PadX), padY = Dpi.Px(anchor, PadY);
+            TextRenderer.DrawText(e.Graphics, text, Font, new Rectangle(padX, padY, Width - padX * 2, Height - padY * 2), p.SecondaryText, Flags);
+        }
+        // Hovering the name for a moment shows the tip; the name brightens a little meanwhile to show it has one.
+        public static void Attach(Label name, string text) {
+            name.Dock = DockStyle.None; name.AutoSize = true; // only the words themselves react, not the empty cell around them
+            var timer = new Timer { Interval = Delay }; InfoTip tip = null; Color normal = Color.Empty;
+            Action close = delegate { timer.Stop(); if (tip != null) { tip.Close(); tip.Dispose(); tip = null; } if (normal != Color.Empty) { name.ForeColor = normal; normal = Color.Empty; } };
+            name.MouseEnter += delegate { normal = name.ForeColor; name.ForeColor = Theme.Current.Dark ? Color.White : Color.Black; timer.Start(); };
+            name.MouseLeave += delegate { close(); };
+            timer.Tick += delegate {
+                timer.Stop(); if (name.IsDisposed || !name.Visible || tip != null) return;
+                if (!name.ClientRectangle.Contains(name.PointToClient(Cursor.Position))) return;
+                tip = new InfoTip(name, text); tip.Place(); tip.Show(name.FindForm());
+            };
+            name.VisibleChanged += delegate { if (!name.Visible) close(); };
+            name.Disposed += delegate { close(); timer.Dispose(); };
+        }
+    }
+    // Set Key (a pretty shortcut such as "Left Alt") to draw it like the shortcut fields (monospace, soft side, bold key)
+    // between Text and Suffix; without a key, Text alone is shown.
+    public sealed class ValueField : Control {
+        string key = "", suffix = "";
+        // Created on first paint, not as a field initializer: this control is built while the main window is being
+        // constructed, and a font created that early (before Windows Forms enables per-monitor DPI) makes every
+        // native text box in the app use 100%-scale fonts.
+        Font mono;
+        Font Mono { get { return mono ?? (mono = new Font("Consolas", 10.5f)); } }
+        public ValueField() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); Cursor = Cursors.Hand; TabStop = false; }
+        public string Key { get { return key; } set { key = value ?? ""; Invalidate(); } }
+        public string Suffix { get { return suffix; } set { suffix = value ?? ""; Invalidate(); } }
+        public override Size GetPreferredSize(Size proposed) { return new Size(Dpi.Px(this, 180), Dpi.Px(this, Dpi.FieldHeight)); }
+        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+        protected override void OnPaint(PaintEventArgs e) {
+            var p = Theme.Current; var g = e.Graphics; g.Clear(Parent == null ? p.AppBackground : Parent.BackColor);
+            Dpi.Field(g, this, p.ShortcutBadgeBackground, p.Border, false);
+            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
+            if (key.Length == 0) { TextRenderer.DrawText(g, Text, Font, ClientRectangle, p.ShortcutBadgeForeground, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix); return; }
+            float scale = Dpi.Scale(this); int space = TextRenderer.MeasureText(g, " ", Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+            int before = Text.Length == 0 ? 0 : TextRenderer.MeasureText(g, Text, Font, Size.Empty, flags).Width + space;
+            int keyW = KeyText.Width(g, key, Mono, scale), after = suffix.Length == 0 ? 0 : space + TextRenderer.MeasureText(g, suffix, Font, Size.Empty, flags).Width;
+            int x = Math.Max(0, (Width - before - keyW - after) / 2);
+            if (before > 0) TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, before, Height), p.ShortcutBadgeForeground, flags);
+            x += before; KeyText.Draw(g, new Rectangle(x, 0, keyW, Height), key, Mono, p.ShortcutBadgeForeground, p.MutedText, scale); x += keyW;
+            if (after > 0) TextRenderer.DrawText(g, suffix, Font, new Rectangle(x + space, 0, after, Height), p.ShortcutBadgeForeground, flags);
+        }
+        protected override void Dispose(bool disposing) { if (disposing && mono != null) mono.Dispose(); base.Dispose(disposing); }
+    }
     public sealed class TextField : Control {
         readonly TextBox box = new TextBox { BorderStyle = BorderStyle.None };
         public TextField() {
@@ -143,6 +231,44 @@ namespace WindowSwitch {
             NativeStyle.Popup(drop.Handle);
             drop.Show(owner, new Point(alignRight ? owner.Width - width : 0, owner.Height + Dpi.Px(owner, 4)));
             list.Focus();
+            return drop;
+        }
+        // A small number field (digits, '.', '-') under owner (right-aligned): Enter hands the text to commit, which returns null to
+        // close or a message to show in place of the hint; Esc or clicking elsewhere closes without a change.
+        public static ToolStripDropDown ShowInput(Control owner, string text, string unit, string hint, int width, Func<string, string> commit, Action closed) {
+            var font = owner.FindForm() == null ? owner.Font : owner.FindForm().Font; var p = Theme.Current;
+            int pad = Dpi.Px(owner, 12), gap = Dpi.Px(owner, 8), field = Dpi.Px(owner, Dpi.FieldHeight);
+            var panel = new Panel { BackColor = p.PopoverBackground, Font = font };
+            var input = new TextField { Text = text, Font = font, AutoSize = false }; input.Box.MaxLength = 6;
+            input.Box.KeyPress += delegate(object sender, KeyPressEventArgs e) { if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar) && e.KeyChar != '.' && e.KeyChar != '-') e.Handled = true; };
+            var unitLabel = new Label { Text = unit, AutoSize = true, Font = font, ForeColor = p.PrimaryText, BackColor = p.PopoverBackground };
+            var note = new Label { Text = hint, AutoSize = false, Font = font, ForeColor = p.SecondaryText, BackColor = p.PopoverBackground, TextAlign = ContentAlignment.MiddleLeft };
+            panel.Controls.Add(input); panel.Controls.Add(unitLabel); panel.Controls.Add(note);
+            // Theme the text box like the window's own fields, then restore the popover's own surface colours.
+            Theme.Apply(panel); panel.BackColor = unitLabel.BackColor = note.BackColor = p.PopoverBackground; unitLabel.ForeColor = p.PrimaryText; note.ForeColor = p.SecondaryText;
+            int unitW = TextRenderer.MeasureText(unit, font).Width, noteH = font.Height + Dpi.Px(owner, 6);
+            input.SetBounds(pad, pad, width - pad * 2 - unitW - gap, field);
+            unitLabel.Location = new Point(input.Right + gap, pad + (field - unitLabel.PreferredHeight) / 2);
+            note.SetBounds(pad, pad + field + gap / 2, width - pad * 2, noteH);
+            var size = new Size(width, note.Bottom + pad); panel.Size = size;
+            var host = new ToolStripControlHost(panel) { Margin = Padding.Empty, Padding = Padding.Empty, AutoSize = false, Size = size };
+            var drop = new ToolStripDropDown { Padding = Padding.Empty, AutoSize = false, DropShadowEnabled = true, Renderer = new BareRenderer(), BackColor = p.PopoverBackground, Size = size, Font = font };
+            // The host would otherwise hand its own default font to the panel (a small text box).
+            drop.Items.Add(host); host.Font = font; panel.Font = font; input.Font = font; input.Box.Font = font; input.PerformLayout();
+            input.Box.KeyDown += delegate(object sender, KeyEventArgs e) {
+                if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; drop.Close(); }
+                else if (e.KeyCode == Keys.Enter) {
+                    e.SuppressKeyPress = true; string problem = commit(input.Text);
+                    if (problem == null) drop.Close(); else { note.Text = problem; note.ForeColor = Theme.Current.WarningForeground; input.Box.SelectAll(); }
+                }
+            };
+            drop.Closed += delegate {
+                if (closed != null) closed();
+                EventHandler idle = null; idle = delegate { Application.Idle -= idle; drop.Dispose(); }; Application.Idle += idle;
+            };
+            NativeStyle.Popup(drop.Handle);
+            drop.Show(owner, new Point(owner.Width - width, owner.Height + Dpi.Px(owner, 4)));
+            input.Box.Focus(); input.Box.SelectAll();
             return drop;
         }
     }
@@ -274,7 +400,10 @@ namespace WindowSwitch {
         public override Size GetPreferredSize(Size proposed) { int w = Inset * 2; for (int i = 0; i < Items.Count; i++) w += SegmentWidth(i); return new Size(w, Math.Max(Dpi.Px(this, Dpi.FieldHeight), Font.Height + Dpi.Px(this, 14))); }
         protected override void OnPaint(PaintEventArgs e) {
             var p = Theme.Current; var g = e.Graphics; g.Clear(Parent == null ? p.AppBackground : Parent.BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
-            Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Dark ? p.AppBackground : p.SecondaryButtonBackground, Dpi.Px(this, 10));
+            // Dark: a track recessed into a raised card, but one step lighter when it sits on the window background
+            // itself (the slide-in sheets), where a background-coloured track would vanish.
+            bool onBackground = Parent != null && Parent.BackColor.ToArgb() == p.AppBackground.ToArgb();
+            Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Dark && !onBackground ? p.AppBackground : p.SecondaryButtonBackground, Dpi.Px(this, 10));
             for (int i = 0; i < Items.Count; i++) {
                 var r = Segment(i);
                 if (i == selected) {
@@ -466,6 +595,31 @@ namespace WindowSwitch {
     }
 
     // Small icon button for sheets: "×" by default, "‹" with Back.
+    // Eye next to a shortcut: open = shown in the hold preview, crossed out = not. Disabled (greyed) while the app's
+    // 显示预览 is off, which hides the whole app regardless.
+    public sealed class EyeToggle : Control {
+        bool hover, on;
+        public event EventHandler CheckedChanged;
+        public EyeToggle() {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable | ControlStyles.ResizeRedraw, true);
+            Size = new Size(32, 32); TabStop = true; Cursor = Cursors.Hand; AccessibleRole = AccessibleRole.CheckButton; AccessibleName = "在预览中显示";
+        }
+        public bool Checked { get { return on; } set { if (on == value) return; on = value; Invalidate(); if (CheckedChanged != null) CheckedChanged(this, EventArgs.Empty); } }
+        protected override void OnClick(EventArgs e) { if (Enabled) Checked = !Checked; base.OnClick(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnPaint(PaintEventArgs e) {
+            var p = Theme.Current; var g = e.Graphics; g.Clear(Parent == null ? p.AppBackground : Parent.BackColor); g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (hover && Enabled) Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Hover, Dpi.Px(this, 8));
+            Color color = !Enabled ? p.DisabledText : on ? (hover ? p.PrimaryText : p.SecondaryText) : (hover ? p.SecondaryText : p.MutedText);
+            using (var font = new Font(Dpi.IconFont, 10f))
+                TextRenderer.DrawText(g, on ? "\uE890" : "\uED1A", font, ClientRectangle, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            if (Focused && ShowFocusCues) Dpi.FocusRing(g, this, Dpi.Px(this, 8));
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override bool IsInputKey(Keys key) { return key == Keys.Enter || key == Keys.Space || base.IsInputKey(key); }
+        protected override void OnKeyDown(KeyEventArgs e) { if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { OnClick(EventArgs.Empty); e.Handled = true; } base.OnKeyDown(e); }
+    }
     public sealed class CloseButton : Control {
         bool hover;
         public bool Back;

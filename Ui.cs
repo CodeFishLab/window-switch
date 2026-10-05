@@ -181,7 +181,7 @@ namespace WindowSwitch {
         public readonly Button SaveButton = Ui.Button("保存", true);
         public event EventHandler Saved, Cancelled;
         protected SheetPanel(string title, string lead) {
-            Padding = new Padding(1, 0, 0, 0);
+            Padding = new Padding(1, 0, 0, 0); SetStyle(ControlStyles.ResizeRedraw, true); // its left divider spans the full height
             // Wrap widths follow the sheet's own width (e.g. when its scrollbar appears), not just the window's.
             Body.Layout += delegate { UiForm.WrapLabels(Body); };
             Body.Padding = new Padding(20, 4, 20, 12);
@@ -202,9 +202,21 @@ namespace WindowSwitch {
         }
         protected abstract void Save();
         public abstract void FocusFirst();
+        // Writes the sheet's values (set by the owner); false when they could not be stored.
+        public Func<bool> Committing;
+        bool committed;
+        // Saves as if 保存 were clicked; false when validation or storing failed (the sheet then shows why).
+        public bool TrySave() { committed = false; Save(); return committed; }
+        // Whether the form differs from what it was opened with.
+        public virtual bool HasChanges { get { return false; } }
+        // Brief confirmation on the button after the sheet was saved and reopened.
+        public void FlashSaved() {
+            SaveButton.Text = "已保存"; var timer = new System.Windows.Forms.Timer { Interval = 1400 };
+            timer.Tick += delegate { timer.Stop(); timer.Dispose(); if (!SaveButton.IsDisposed) SaveButton.Text = "保存"; }; timer.Start();
+        }
         // Esc first closes inner views (e.g. the app picker); returns false when the sheet itself should close.
         public virtual bool HandleEscape() { return false; }
-        protected void RaiseSaved() { if (Saved != null) Saved(this, EventArgs.Empty); }
+        protected void RaiseSaved() { committed = Committing == null || Committing(); if (committed && Saved != null) Saved(this, EventArgs.Empty); }
         void RaiseCancelled() { if (Cancelled != null) Cancelled(this, EventArgs.Empty); }
         // Composited painting keeps the sheet from flickering while it slides.
         protected override CreateParams CreateParams { get { var value = base.CreateParams; value.ExStyle |= 0x02000000; return value; } }
@@ -282,6 +294,7 @@ namespace WindowSwitch {
         readonly List<ShortcutRecorder> recorders = new List<ShortcutRecorder>();
         readonly List<Control> shortcutRows = new List<Control>();
         readonly List<Control[]> rowButtons = new List<Control[]>(); // per row: grip, remove
+        readonly List<EyeToggle> eyes = new List<EyeToggle>();          // per row: shown in the hold preview
         int dragIndex = -1;
         readonly TextButton addShortcut = new TextButton { Text = "添加快捷键", AccessibleName = "添加快捷键" };
         SizeF scaledBy = new SizeF(1, 1);
@@ -290,6 +303,10 @@ namespace WindowSwitch {
         readonly Toggle enabled = new Toggle { Checked = true, AccessibleName = "启用这个快捷键" };
         readonly Toggle inPreview = new Toggle { Checked = true, AccessibleName = "显示预览" };
         readonly Toggle previewSides = new Toggle { Checked = true, AccessibleName = "预览显示 Left / Right" };
+        // 随鼠标换屏 for this app: follow the main switch, or always / never.
+        readonly SegmentedControl screenMode = new SegmentedControl { AccessibleName = "随鼠标换屏" };
+        // What pressing the shortcut does while the app is in front: minimize it, or close the window.
+        readonly SegmentedControl pressAgain = new SegmentedControl { AccessibleName = "再次按下时" };
         readonly Disclosure disclosure = new Disclosure { Text = "高级设置" };
         readonly TableLayoutPanel advanced = Ui.Table(2);
         Label error { get { return Error; } }
@@ -300,6 +317,14 @@ namespace WindowSwitch {
         readonly SynchronizationContext ui;
         public AppRule Rule;
         public Func<AppRule, string> ValidateRule;
+        // What the form showed when it opened; browser-profile details that load later are left out on purpose.
+        string initial;
+        string Snapshot() {
+            var keys = string.Join("|", recorders.Select((r, i) => r.Text.Trim() + (eyes.Count > i && eyes[i].Checked ? "*" : "")).Where(t => t.Trim('*').Length > 0));
+            return string.Join("", new[] { name.Text.Trim(), process.Text.Trim(), executable.Text.Trim(), arguments.Text, title.Text.Trim(), userData.Text.Trim(), keys,
+                enabled.Checked.ToString(), inPreview.Checked.ToString(), previewSides.Checked.ToString(), screenMode.SelectedIndex.ToString(), pressAgain.SelectedIndex.ToString(), target.TargetType.ToString(), target.ProfileDirectory ?? "", target.WindowAppId ?? "" });
+        }
+        public override bool HasChanges { get { return initial != null && Snapshot() != initial; } }
         // 移除 asks for a second click before it fires.
         public event EventHandler RemoveRequested;
         public RuleEditor(AppRule existing) : base(existing == null ? "添加应用" : "编辑应用", null) {
@@ -334,12 +359,25 @@ namespace WindowSwitch {
             var keyTools = Ui.Table(2); keyTools.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); keyTools.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); keyTools.RowStyles.Add(new RowStyle(SizeType.AutoSize)); keyTools.RowCount = 1; keyTools.Margin = new Padding(0, 0, 0, 12);
             addShortcut.Anchor = AnchorStyles.Left; addShortcut.Margin = new Padding(0, 0, 12, 0); keyTools.Controls.Add(addShortcut, 0, 0);
             Ui.Row(Content, keyTools);
-            addShortcut.Click += delegate { var added = AddShortcutRow(""); added.Focus(); };
+            // A new extra shortcut starts hidden from the preview (open its eye to show it there too).
+            addShortcut.Click += delegate { var added = AddShortcutRow("", recorders.Count == 0); added.Focus(); };
 
             Ui.Row(Content, Ui.ToggleRow("启用这个快捷键", enabled));
             Ui.Row(Content, Ui.ToggleRow("显示预览", inPreview));
             var sidesRow = Ui.ToggleRow("预览显示 Left / Right", previewSides); Ui.Row(Content, sidesRow);
-            inPreview.CheckedChanged += delegate { sidesRow.Visible = inPreview.Checked; };
+            screenMode.Items.AddRange(new[] { "跟随总开关", "总是", "从不" }); screenMode.SelectedIndex = 0;
+            var screenRow = Ui.Table(2); screenRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); screenRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            screenRow.RowStyles.Add(new RowStyle(SizeType.AutoSize)); screenRow.RowCount = 1; screenRow.Margin = new Padding(0, 0, 0, 12);
+            var screenLabel = Ui.Label("随鼠标换屏"); screenLabel.Dock = DockStyle.None; screenLabel.Anchor = AnchorStyles.Left; screenLabel.Margin = Padding.Empty;
+            screenMode.Dock = DockStyle.None; screenMode.Anchor = AnchorStyles.Right; screenMode.Margin = Padding.Empty;
+            screenRow.Controls.Add(screenLabel, 0, 0); screenRow.Controls.Add(screenMode, 1, 0); Ui.Row(Content, screenRow);
+            pressAgain.Items.AddRange(new[] { "最小化", "关闭窗口" }); pressAgain.SelectedIndex = 0;
+            var againRow = Ui.Table(2); againRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); againRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            againRow.RowStyles.Add(new RowStyle(SizeType.AutoSize)); againRow.RowCount = 1; againRow.Margin = new Padding(0, 0, 0, 12);
+            var againLabel = Ui.Label("再次按下时"); againLabel.Dock = DockStyle.None; againLabel.Anchor = AnchorStyles.Left; againLabel.Margin = Padding.Empty;
+            pressAgain.Dock = DockStyle.None; pressAgain.Anchor = AnchorStyles.Right; pressAgain.Margin = Padding.Empty;
+            againRow.Controls.Add(againLabel, 0, 0); againRow.Controls.Add(pressAgain, 1, 0); Ui.Row(Content, againRow);
+            inPreview.CheckedChanged += delegate { sidesRow.Visible = inPreview.Checked; foreach (var eye in eyes) eye.Enabled = inPreview.Checked; };
 
             disclosure.Dock = DockStyle.None; disclosure.Anchor = AnchorStyles.Left; disclosure.Margin = Padding.Empty; Ui.Row(Content, disclosure);
             advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56)); advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44)); advanced.Visible = false; advanced.Margin = new Padding(0, 10, 0, 0);
@@ -353,33 +391,35 @@ namespace WindowSwitch {
             disclosure.ExpandedChanged += delegate { advanced.Visible = disclosure.Expanded; if (disclosure.Expanded) Body.RevealLater(advanced); };
 
             if (existing != null) {
-                target = Clone(existing); name.Text = existing.Name; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview; previewSides.Checked = !existing.HideSidesInPreview;
+                target = Clone(existing); name.Text = existing.Name; int n = 0; foreach (string key in existing.AllShortcuts()) AddShortcutRow(key, existing.PreviewShortcuts == null ? n++ == 0 : existing.PreviewShortcuts.Contains(key)); process.Text = existing.ProcessName; executable.Text = existing.Executable; arguments.Text = existing.Arguments; title.Text = existing.TitleContains; userData.Text = existing.UserDataDirectory; enabled.Checked = existing.Enabled; inPreview.Checked = !existing.HideInPreview; previewSides.Checked = !existing.HideSidesInPreview; screenMode.SelectedIndex = existing.ScreenMode >= 0 && existing.ScreenMode <= 2 ? existing.ScreenMode : 0; pressAgain.SelectedIndex = existing.PressAgain == 1 ? 1 : 0;
                 hasTarget = true; targetTitle = TargetTitle(existing); LoadProfiles(existing.ProfileDirectory);
             }
-            if (recorders.Count == 0) AddShortcutRow("");
+            if (recorders.Count == 0) AddShortcutRow("", true);
+            initial = Snapshot();
             UpdateCard();
         }
         // Rows added after the sheet was DPI-scaled must be scaled the same way.
         protected override void ScaleControl(SizeF factor, BoundsSpecified specified) { base.ScaleControl(factor, specified); scaledBy = new SizeF(scaledBy.Width * factor.Width, scaledBy.Height * factor.Height); }
-        ShortcutRecorder AddShortcutRow(string value) {
+        ShortcutRecorder AddShortcutRow(string value, bool shown) {
             var recorder = new ShortcutRecorder { Text = value ?? "", AccessibleName = "快捷键" };
             var grip = new DragHandle { Margin = new Padding(0, 0, 4, 0), Anchor = AnchorStyles.Left };
-            var remove = new CloseButton { AccessibleName = "删除这个快捷键", Size = new Size(28, 32), Margin = new Padding(6, 0, 0, 0), Anchor = AnchorStyles.Right };
-            var row = Ui.Table(3); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            var eye = new EyeToggle { Checked = shown, Enabled = inPreview.Checked, Size = new Size(30, 32), Margin = new Padding(6, 0, 0, 0), Anchor = AnchorStyles.Right };
+            var remove = new CloseButton { AccessibleName = "删除这个快捷键", Size = new Size(28, 32), Margin = new Padding(2, 0, 0, 0), Anchor = AnchorStyles.Right };
+            var row = Ui.Table(4); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             row.RowStyles.Add(new RowStyle(SizeType.AutoSize)); row.RowCount = 1; row.Margin = new Padding(0, 0, 0, 8);
             recorder.Dock = DockStyle.Fill; recorder.Margin = Padding.Empty;
-            row.Controls.Add(grip, 0, 0); row.Controls.Add(recorder, 1, 0); row.Controls.Add(remove, 2, 0);
+            row.Controls.Add(grip, 0, 0); row.Controls.Add(recorder, 1, 0); row.Controls.Add(eye, 2, 0); row.Controls.Add(remove, 3, 0);
             if (scaledBy.Width != 1) row.Scale(scaledBy);
             // Rows stay in place; dragging moves the value through them, so the dragged shortcut follows the pointer.
             grip.DragStarted += delegate { dragIndex = shortcutRows.IndexOf(row); if (dragIndex >= 0) MarkDragged(dragIndex, true); };
             grip.DragMoved += delegate(Point screen) { if (dragIndex >= 0) DragTo(RowAt(shortcutList.PointToClient(screen).Y)); };
             grip.DragEnded += delegate { if (dragIndex >= 0 && dragIndex < recorders.Count) MarkDragged(dragIndex, false); dragIndex = -1; };
             remove.Click += delegate {
-                int at = shortcutRows.IndexOf(row); recorders.RemoveAt(at); shortcutRows.RemoveAt(at); rowButtons.RemoveAt(at);
+                int at = shortcutRows.IndexOf(row); recorders.RemoveAt(at); shortcutRows.RemoveAt(at); rowButtons.RemoveAt(at); eyes.RemoveAt(at);
                 shortcutList.Controls.Remove(row); row.Dispose(); UpdateShortcutRows();
                 if (recorders.Count > 0) addShortcut.Focus();
             };
-            recorders.Add(recorder); shortcutRows.Add(row); rowButtons.Add(new Control[] { grip, remove });
+            recorders.Add(recorder); shortcutRows.Add(row); rowButtons.Add(new Control[] { grip, remove }); eyes.Add(eye);
             Ui.Row(shortcutList, row); Theme.Apply(row); UpdateShortcutRows();
             return recorder;
         }
@@ -393,6 +433,7 @@ namespace WindowSwitch {
             while (dragIndex != target) {
                 int next = dragIndex + Math.Sign(target - dragIndex);
                 string text = recorders[dragIndex].Text; recorders[dragIndex].Text = recorders[next].Text; recorders[next].Text = text;
+                bool shown = eyes[dragIndex].Checked; eyes[dragIndex].Checked = eyes[next].Checked; eyes[next].Checked = shown;
                 MarkDragged(dragIndex, false); MarkDragged(next, true); dragIndex = next;
             }
         }
@@ -510,7 +551,8 @@ namespace WindowSwitch {
                 var seen = new HashSet<string>(); foreach (string key in keys) if (!seen.Add(KeyChord.Parse(key).Id)) throw new ArgumentException("同一个快捷键填写了两次：" + KeyChord.Pretty(key));
                 var selectedProfile = profileChoice.SelectedValue as BrowserProfile;
                 if (target.TargetType == TargetType.Profile && selectedProfile != null && !selectedProfile.UserData.Equals(userData.Text.Trim(), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("数据目录已改变，请点击高级设置里的“重新识别用户”。");
-                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked; proposed.HideSidesInPreview = !previewSides.Checked;
+                var proposed = Draft(); proposed.Shortcut = keys[0]; proposed.MoreShortcuts = keys.Skip(1).ToList(); proposed.Enabled = enabled.Checked; proposed.HideInPreview = !inPreview.Checked; proposed.HideSidesInPreview = !previewSides.Checked; proposed.ScreenMode = screenMode.SelectedIndex; proposed.PressAgain = pressAgain.SelectedIndex;
+                proposed.PreviewShortcuts = recorders.Select((r, i) => new { Key = r.Text.Trim(), Shown = eyes[i].Checked }).Where(x => x.Key.Length > 0 && x.Shown).Select(x => x.Key).ToList();
                 if (ValidateRule != null) { string message = ValidateRule(proposed); if (message != null) throw new ArgumentException(message); }
                 Rule = proposed; RaiseSaved();
             } catch (Exception ex) { error.Text = ex.Message; }
