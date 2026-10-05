@@ -47,10 +47,14 @@ namespace WindowSwitch {
             var root = Ui.Table(); root.Padding = new Padding(24);
             var header = Ui.Table(2); header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.Controls.Add(Ui.Heading("窗口切换", 16), 0, 0); summary.TextAlign = ContentAlignment.MiddleRight; summary.Margin = new Padding(12, 0, 0, 6); header.Controls.Add(summary, 1, 0); Ui.Row(root, header);
-            var tools = Ui.Flow(); tools.WrapContents = false; tools.Margin = new Padding(0, 12, 0, 16);
+            var toolbar = Ui.Table(2); toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); toolbar.Margin = new Padding(0, 12, 0, 16);
+            var tools = Ui.Flow(); tools.WrapContents = false;
             AddButton(tools, "＋ 添加应用", true, delegate { if (LeaveSheet()) OpenRuleDialog(-1); });
             // Rows open in the sheet with a single click; 测试 and 移除 live in that sheet, 重试 in the tray menu.
-            Ui.Row(root, tools);
+            // 暂停快捷键 sits under the summary on the right (the same switch as the tray menu item); not saved.
+            pauseButton = Ui.Button("暂停快捷键"); pauseButton.Anchor = AnchorStyles.Right; pauseButton.Margin = Padding.Empty; pauseButton.Click += delegate { SetPaused(!paused); };
+            toolbar.Controls.Add(tools, 0, 0); toolbar.Controls.Add(pauseButton, 1, 0);
+            Ui.Row(root, toolbar);
             var listSurface = new Card { Dock = DockStyle.Fill, Padding = new Padding(4), Margin = Padding.Empty };
             // Dragging a row reorders the apps (hotkeys, preview and list follow the new order).
             list.StatusClicked += row => { if (editing || sheet != null) list.SelectedIndex = settings.Applications.IndexOf(row.Rule); else ToggleRuleEnabled(row.Rule); };
@@ -132,6 +136,13 @@ namespace WindowSwitch {
             control.Anchor = AnchorStyles.Right; control.Margin = Padding.Empty; table.Controls.Add(control, 1, 0); return table;
         }
         static Button AddButton(FlowLayoutPanel panel, string text, bool primary, EventHandler action) { var button = Ui.Button(text, primary); button.Click += action; panel.Controls.Add(button); return button; }
+        // All shortcuts off for now (games, recording...): the main window button and the tray menu item stay in step.
+        Button pauseButton; ToolStripMenuItem pauseItem;
+        void SetPaused(bool on) {
+            if (paused == on) return;
+            paused = on; pauseButton.Text = on ? "恢复快捷键" : "暂停快捷键"; if (pauseItem != null) pauseItem.Checked = on;
+            RegisterRules();
+        }
         void ChangeStartup(bool enable) { try { SetStartup(enable); } catch (Exception ex) { note.Text = "启动设置失败：" + ex.Message; } refreshing = true; startup.Checked = IsStartupEnabled(); refreshing = false; }
         void ChangeTrayIcon(bool show) {
             var proposed = CopySettings(); proposed.ShowTrayIcon = show;
@@ -147,7 +158,7 @@ namespace WindowSwitch {
             var menu = new ContextMenuStrip(); menu.Items.Add("打开 Window Switch", null, delegate { ShowSettings(); }); menu.Items.Add("快捷键预览", null, delegate { hints.ShowPreview(OverlayDisplayReason.TrayPreview); });
             menu.Items.Add(new ToolStripSeparator()); var launch = new ToolStripMenuItem("随 Windows 登录启动") { CheckOnClick = false }; launch.Click += delegate { ChangeStartup(!IsStartupEnabled()); }; menu.Items.Add(launch);
             var themes = new ToolStripMenuItem("主题"); string[] names = { "跟随系统", "亮色", "暗色" }; for (int i = 0; i < names.Length; i++) { int mode = i; var item = new ToolStripMenuItem(names[i]); item.Click += delegate { ChangeTheme((ThemeMode)mode); }; themes.DropDownItems.Add(item); } menu.Items.Add(themes);
-            var pause = new ToolStripMenuItem("暂停快捷键") { CheckOnClick = true }; pause.CheckedChanged += delegate { paused = pause.Checked; RegisterRules(); }; menu.Items.Add(pause);
+            pauseItem = new ToolStripMenuItem("暂停快捷键") { CheckOnClick = true }; pauseItem.CheckedChanged += delegate { SetPaused(pauseItem.Checked); }; menu.Items.Add(pauseItem);
             menu.Items.Add("重试快捷键", null, delegate { RegisterRules(); }); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("退出", null, delegate { Quit(); });
             menu.Opening += delegate { launch.Checked = IsStartupEnabled(); for (int i = 0; i < 3; i++) ((ToolStripMenuItem)themes.DropDownItems[i]).Checked = i == (int)settings.Theme; };
             Ui.StyleMenu(menu);
@@ -328,12 +339,13 @@ namespace WindowSwitch {
             public void Refresh(bool force = false) {
                 if (draft || (Recorder.Focused && !force)) return;
                 var saved = Saved; Recorder.Text = saved.HasKey ? saved.Display : "未设置"; Recorder.Dim = !saved.Enabled;
-                // 停用 for a working key, 启用 for a kept one; nothing to do for a key that was never set.
-                bool canAct = saved.Enabled || saved.HasKey;
+                // 停用 for a working key, 启用 for a kept one; nothing to do for a key that was never set. While all
+                // shortcuts are paused the button just says 已暂停 (恢复快捷键 at the top brings them back).
+                bool pausedKey = form.paused && saved.HasKey, canAct = (saved.Enabled || saved.HasKey) && !pausedKey;
                 if (!canAct && action.Focused) ParkFocus(); // a disabled button would hand focus to the next shortcut field
-                action.Enabled = canAct; action.Text = saved.Enabled || !saved.HasKey ? "停用" : "启用"; action.Invalidate();
+                action.Enabled = canAct; action.Text = pausedKey ? "已暂停" : saved.Enabled || !saved.HasKey ? "停用" : "启用"; action.Invalidate();
                 string current = state();
-                Caption.Text = !saved.Enabled || current == "已生效" ? (idleHint ?? "") : current;
+                Caption.Text = !saved.Enabled || current == "已生效" || current == "已暂停" ? (idleHint ?? "") : current;
             }
         }
         void RefreshGlobalShortcuts() { if (openApp != null) openApp.Refresh(); if (minimizeSetting != null) minimizeSetting.Refresh(); if (moveScreenSetting != null) moveScreenSetting.Refresh(); }

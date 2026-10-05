@@ -177,15 +177,15 @@ namespace WindowSwitch {
             return Math.Max(left + keys + right, 2 * Math.Max(left, right) + keys);
         }
         // The preview marks each app's state with a dot in a narrow cell at the right edge, mirroring the number column
-        // on the left: green = on, hollow ring = switched off, light red = conflict, grey = paused. The main list keeps the
+        // on the left: green = on, grey = switched off, light red = conflict, hollow ring = paused (all shortcuts at once). The main list keeps the
         // labelled pill.
         const int OverlayDotCell = 26;
         static int OverlayDot(Font font, float scale) { return (int)(OverlayDotCell * scale); }
         static void DrawDot(Graphics g, Rectangle cell, string state, float scale) {
             // Same size as the dot the pill used to carry; the ring is a touch wider so its hollow still reads.
-            var p = Theme.Current; int d = (int)((state == "已停用" ? 6 : 5) * scale);
+            var p = Theme.Current; int d = (int)((state == "已暂停" ? 6 : 5) * scale);
             var r = new Rectangle(cell.Left + (cell.Width - d) / 2, cell.Top + (cell.Height - d) / 2, d, d);
-            if (state == "已停用") { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(p.MutedText, w)) g.DrawEllipse(pen, r.X + w / 2, r.Y + w / 2, r.Width - w, r.Height - w); return; }
+            if (state == "已暂停") { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(p.MutedText, w)) g.DrawEllipse(pen, r.X + w / 2, r.Y + w / 2, r.Width - w, r.Height - w); return; }
             using (var b = new SolidBrush(state == "已生效" ? p.StatusDot : state == "有冲突" ? p.ConflictDot : p.MutedText)) g.FillEllipse(b, r);
         }
         public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0, bool numbered = false, bool highlighted = false) {
@@ -255,7 +255,9 @@ namespace WindowSwitch {
                     Color statusBg = success ? p.SuccessBackground : state == "有冲突" ? p.WarningBackground : p.SecondaryButtonBackground;
                     Color statusFg = success ? p.SuccessForeground : state == "有冲突" ? p.WarningForeground : p.SecondaryText;
                     Theme.Fill(g, status, statusBg, pillH / 2); int dot = (int)(5 * scale);
-                    using (var b = new SolidBrush(success ? p.StatusDot : statusFg)) g.FillEllipse(b, status.Left + (int)(9 * scale), status.Top + (pillH - dot) / 2, dot, dot);
+                    // Paused (all shortcuts at once) shows the same hollow ring as in the preview.
+                    if (state == "已暂停") { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(statusFg, w)) g.DrawEllipse(pen, status.Left + (int)(9 * scale) + w / 2, status.Top + (pillH - dot) / 2 + w / 2, dot - w, dot - w); }
+                    else using (var b = new SolidBrush(success ? p.StatusDot : statusFg)) g.FillEllipse(b, status.Left + (int)(9 * scale), status.Top + (pillH - dot) / 2, dot, dot);
                     TextRenderer.DrawText(g, state, small, new Rectangle(status.X + (int)(15 * scale), status.Y, status.Width - (int)(17 * scale), status.Height), statusFg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
                 foreach (string badge in badges) {
