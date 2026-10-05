@@ -50,17 +50,10 @@ namespace WindowSwitch {
     }
     // Small settings gear in the preview's top-right corner; it opens the Window Switch window.
     sealed class OverlayGear : Control {
-        bool hover; static string iconFont;
+        bool hover;
         public OverlayGear() {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             Cursor = Cursors.Hand; TabStop = false; AccessibleName = "设置"; AccessibleRole = AccessibleRole.PushButton;
-        }
-        // The system icon font draws a crisp gear at any DPI (Windows 11: Segoe Fluent Icons, Windows 10: Segoe MDL2 Assets).
-        static string IconFont {
-            get {
-                if (iconFont == null) using (var fonts = new System.Drawing.Text.InstalledFontCollection()) iconFont = fonts.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
-                return iconFont;
-            }
         }
         // The list underneath (e.g. the first row's highlight) shows through: only the glyph and its hover disc are the gear's own.
         public AppList Behind;
@@ -72,7 +65,7 @@ namespace WindowSwitch {
             }
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             if (hover) Theme.Fill(g, new Rectangle(0, 0, Width - 1, Height - 1), p.Hover, Height / 2);
-            using (var font = new Font(IconFont, 9.5f))
+            using (var font = new Font(Dpi.IconFont, 9.5f))
                 TextRenderer.DrawText(g, "", font, ClientRectangle, hover ? p.PrimaryText : p.MutedText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
@@ -114,8 +107,9 @@ namespace WindowSwitch {
         void UpdateSurface() { BackColor = Theme.Current.OverlayBackground; list.BackColor = BackColor; RoundRegion(); Invalidate(true); }
         protected override void ApplyTheme() { UpdateSurface(); NativeStyle.TitleBar(Handle, Theme.Current.Dark); }
         protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); if (NativeStyle.SystemCorners) return; e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using (var path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)(Theme.LargeRadius * DeviceDpi / 96f))) using (var pen = new Pen(Theme.Current.OverlayBorder)) e.Graphics.DrawPath(pen, path); }
-        // Logical width: 460 (a calm, steady card), growing up to 500 only when names and keys need it.
-        public const int MinWidth = 460, MaxWidth = 500;
+        // Logical width: 460 (a calm, steady card), growing only when names and keys need it (several shortcuts per
+        // app can be shown); past the maximum, extra shortcuts collapse into "+n".
+        public const int MinWidth = 460, MaxWidth = 640;
         int FitWidth(List<HintRow> rows) {
             float scale = DeviceDpi / 96f;
             using (var g = list.CreateGraphics()) {

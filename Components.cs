@@ -11,7 +11,7 @@ namespace WindowSwitch {
         // Danger: destructive action (red text); Armed: waiting for the confirming second click.
         public bool Danger, Armed;
         bool hover, pressed;
-        public RoundButton() { FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true); }
+        public RoundButton() { FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = pressed = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e) { pressed = true; Invalidate(); base.OnMouseDown(e); }
@@ -27,11 +27,12 @@ namespace WindowSwitch {
         }
     }
     public class Card : Panel {
-        public Card() { DoubleBuffered = true; BackColor = Theme.Current.Surface; }
+        // Rounded corners are drawn at the edges: the whole card repaints when it is resized.
+        public Card() { DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true); BackColor = Theme.Current.Surface; }
         protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(Parent == null ? Theme.Current.AppBackground : Parent.BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; Theme.Fill(e.Graphics, new Rectangle(0, 0, Width - 1, Height - 1), Theme.Current.Surface, (int)(Theme.Radius * DeviceDpi / 96f)); }
     }
     public class Toggle : CheckBox {
-        public Toggle() { AutoSize = false; Size = new Size(42, 26); Text = ""; Cursor = Cursors.Hand; SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true); }
+        public Toggle() { AutoSize = false; Size = new Size(42, 26); Text = ""; Cursor = Cursors.Hand; SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
         protected override void OnPaint(PaintEventArgs e) {
             e.Graphics.Clear(Parent.BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; var p = Theme.Current; int pad = Math.Max(2, Height / 10); int h = Height - pad * 2;
             Theme.Fill(e.Graphics, new Rectangle(0, pad, Width - 1, h), Checked ? p.ToggleOn : p.ToggleOff, h / 2);
@@ -46,9 +47,12 @@ namespace WindowSwitch {
         // Single-key mode records one key (e.g. Right Ctrl) instead of a modifier chord.
         public bool SingleKey; public int KeyCode;
         bool highlight;
+        // A disabled (but kept) shortcut: its key is shown greyed out.
+        bool dim;
+        public bool Dim { get { return dim; } set { if (dim == value) return; dim = value; Invalidate(); } }
         // Drawn like the focused field while its row is being dragged.
         public bool Highlight { get { return highlight; } set { if (highlight == value) return; highlight = value; Invalidate(); } }
-        public ShortcutRecorder() { Cursor = Cursors.Hand; Font = new Font("Consolas", 10.5f); AccessibleName = "快捷键录制"; Size = new Size(180, 34); AutoSize = true; TabStop = true; SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true); }
+        public ShortcutRecorder() { Cursor = Cursors.Hand; Font = new Font("Consolas", 10.5f); AccessibleName = "快捷键录制"; Size = new Size(180, 34); AutoSize = true; TabStop = true; SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
         public override Size GetPreferredSize(Size proposedSize) { return new Size(Dpi.Px(this, 180), Math.Max(Dpi.Px(this, Dpi.FieldHeight), Font.Height + Dpi.Px(this, 10))); }
         protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
         // Any recorder starting or stopping (the main window pauses its shortcuts while one records).
@@ -63,7 +67,7 @@ namespace WindowSwitch {
             // The cue uses the UI font; key names use the monospace font.
             bool hint = cue || string.IsNullOrEmpty(Text);
             if (hint) TextRenderer.DrawText(e.Graphics, cue ? "请按下快捷键…" : "点击设置快捷键", Parent.Font, ClientRectangle, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-            else KeyText.Draw(e.Graphics, ClientRectangle, KeyChord.Pretty(Text), Font, p.ShortcutBadgeForeground, p.MutedText, Dpi.Scale(this));
+            else KeyText.Draw(e.Graphics, ClientRectangle, KeyChord.Pretty(Text), Font, dim && !strong ? p.MutedText : p.ShortcutBadgeForeground, dim && !strong ? p.DisabledText : p.MutedText, Dpi.Scale(this));
         }
         protected override bool IsInputKey(Keys keyData) { return (keyData & Keys.KeyCode) != Keys.Tab; }
         protected override void OnKeyDown(KeyEventArgs e) {
@@ -141,14 +145,16 @@ namespace WindowSwitch {
         public static bool Switchable(HintRow row) { return row != null && row.Rule != null && ShortState(row.State) != "已暂停"; }
         public static string SwitchAction(HintRow row) { return ShortState(row.State) == "已停用" ? "启用" : "停用"; }
         public static void Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay) { Draw(g, bounds, row, font, scale, overlay, RowHover.None); }
-        // The preview reads as a table: names in one column, the status pill close to the right edge, and each app's key
+        // The preview reads as a table: names in one column, the status dot at the right edge, and each app's key
         // centred in the space between them (one shared centre line for every row).
-        const int OverlayNameMax = 160, OverlayColumnGap = 20, OverlayEdge = 10;
+        const int OverlayNameMax = 160, OverlayColumnGap = 20;
         // With numpad opening on, a narrow number column sits left of the icons (the icons move right to make room).
         const int OverlayNumberedLead = 30;
+        // The main list shows every shortcut; the preview shows the ones with the eye open (the first one by default).
         static List<string> Keys(HintRow row, bool overlay) {
-            return (row.Shortcuts ?? new List<string> { row.Shortcut ?? "" }).Take(overlay ? 1 : int.MaxValue).Select(k => KeyChord.Pretty(k))
-                .Select(k => overlay && row.Rule != null && row.Rule.HideSidesInPreview ? KeyText.WithoutSides(k) : k).ToList();
+            IEnumerable<string> keys = row.Shortcuts ?? new List<string> { row.Shortcut ?? "" };
+            if (overlay) { var chosen = row.Rule == null ? null : row.Rule.PreviewShortcuts; keys = chosen == null ? keys.Take(1) : keys.Where(k => chosen.Contains(k)); }
+            return keys.Select(k => KeyChord.Pretty(k)).Select(k => overlay && row.Rule != null && row.Rule.HideSidesInPreview ? KeyText.WithoutSides(k) : k).ToList();
         }
         static Font Mono(Font font, bool overlay) { return new Font("Consolas", font.Size * (overlay ? 1.06f : .96f)); }
         static Font Small(Font font) { return new Font(font.FontFamily, font.Size * .88f); }
@@ -156,18 +162,31 @@ namespace WindowSwitch {
             int w = 0; foreach (var row in rows) w = Math.Max(w, TextRenderer.MeasureText(g, row.Name ?? "", font, Size.Empty, TextFormatFlags.NoPrefix).Width);
             return Math.Min(w, (int)(OverlayNameMax * scale));
         }
-        // Pixel width a preview row needs: padding, icon, name column, key column, pill.
+        // Pixel width a preview row needs: padding, icon, name column, key column, status dot.
         public static int OverlayRowWidth(Graphics g, IList<HintRow> rows, Font font, float scale) {
             int keys = 0, pill = 0;
             using (var small = Small(font)) using (var mono = Mono(font, true))
                 foreach (var row in rows) {
-                    foreach (string k in Keys(row, true)) keys = Math.Max(keys, KeyText.Width(g, k, mono, scale) + (int)(22 * scale));
-                    pill = Math.Max(pill, TextRenderer.MeasureText(g, ShortState(row.State), small).Width + (int)(26 * scale));
+                    var shown = Keys(row, true); // badges side by side, 6 px apart
+                    keys = Math.Max(keys, shown.Sum(k => KeyText.Width(g, k, mono, scale) + (int)(22 * scale)) + Math.Max(0, shown.Count - 1) * (int)(6 * scale));
                 }
+            pill = OverlayDot(font, scale);
             int lead = rows.Any(r => r.Number > 0) ? OverlayNumberedLead : 16;
             // Keys sit centred on the card, so each half must hold half the widest key plus whatever is on that side.
-            int left = (int)((lead + 32 + 12 + OverlayColumnGap) * scale) + OverlayNameColumn(g, rows, font, scale), right = (int)((12 + OverlayEdge) * scale) + pill;
+            int left = (int)((lead + 32 + 12 + OverlayColumnGap) * scale) + OverlayNameColumn(g, rows, font, scale), right = (int)(12 * scale) + pill;
             return Math.Max(left + keys + right, 2 * Math.Max(left, right) + keys);
+        }
+        // The preview marks each app's state with a dot in a narrow cell at the right edge, mirroring the number column
+        // on the left: green = on, hollow ring = switched off, amber = conflict, grey = paused. The main list keeps the
+        // labelled pill.
+        const int OverlayDotCell = 26;
+        static int OverlayDot(Font font, float scale) { return (int)(OverlayDotCell * scale); }
+        static void DrawDot(Graphics g, Rectangle cell, string state, float scale) {
+            // Same size as the dot the pill used to carry; the ring is a touch wider so its hollow still reads.
+            var p = Theme.Current; int d = (int)((state == "已停用" ? 6 : 5) * scale);
+            var r = new Rectangle(cell.Left + (cell.Width - d) / 2, cell.Top + (cell.Height - d) / 2, d, d);
+            if (state == "已停用") { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(p.MutedText, w)) g.DrawEllipse(pen, r.X + w / 2, r.Y + w / 2, r.Width - w, r.Height - w); return; }
+            using (var b = new SolidBrush(state == "已生效" ? p.StatusDot : state == "有冲突" ? p.WarningForeground : p.MutedText)) g.FillEllipse(b, r);
         }
         public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0, bool numbered = false, bool highlighted = false) {
             var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias; var zones = new RowZones();
@@ -179,10 +198,10 @@ namespace WindowSwitch {
                         highlighted ? p.PrimaryText : p.MutedText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             string state = ShortState(row.State); bool success = state == "已生效";
             using (var small = Small(font)) using (var mono = Mono(font, overlay)) {
-                int statusW = TextRenderer.MeasureText(g, state, small).Width + (int)(26 * scale);
                 int pillH = Math.Min(bounds.Height - (int)(14 * scale), font.Height + (int)((overlay ? 11 : 8) * scale));
+                int statusW = overlay ? OverlayDot(font, scale) : TextRenderer.MeasureText(g, state, small).Width + (int)(26 * scale);
                 bool columns = overlay && nameColumn > 0;
-                var status = new Rectangle(bounds.Right - (columns ? (int)(OverlayEdge * scale) : pad) - statusW, bounds.Y + (bounds.Height - pillH) / 2, statusW, pillH);
+                var status = new Rectangle(bounds.Right - (overlay ? 0 : pad) - statusW, bounds.Y + (bounds.Height - pillH) / 2, statusW, pillH);
                 // One badge per shortcut; when they do not fit next to the name, the rest collapse into "+n".
                 var keys = Keys(row, overlay);
                 // The name keeps its real width (up to 140 px logical), so short names leave room for more badges.
@@ -196,7 +215,7 @@ namespace WindowSwitch {
                 }
                 var badges = keys.Take(shown).ToList(); if (shown < keys.Count) badges.Add("+" + (keys.Count - shown));
                 int x = status.Left - gap - total;
-                // Preview: the key is centred on the card itself, but never closer to the names or the pill than the gaps.
+                // Preview: the key is centred on the card itself, but never closer to the names or the dot than the gaps.
                 if (columns) {
                     int from = iconRect.Right + gap + nameColumn + (int)(OverlayColumnGap * scale);
                     x = Math.Min(Math.Max(from, bounds.X + (bounds.Width - total) / 2), x);
@@ -207,13 +226,28 @@ namespace WindowSwitch {
                 int nameW = Math.Min(TextRenderer.MeasureText(g, row.Name ?? "", font, Size.Empty, TextFormatFlags.NoPrefix).Width, nameRect.Width), inset = (int)(6 * scale), reach = (int)(8 * scale);
                 zones.Target = new Rectangle(iconRect.Left - reach, bounds.Y + inset, nameRect.Left + nameW + reach - (iconRect.Left - reach), bounds.Height - inset * 2);
                 zones.Status = status;
+                // Preview, pointer on the dot: it grows left into a pill naming what a click does (停用 / 启用), stopping
+                // short of the keys; the hit zone grows with it so the pill stays put while the pointer is on it.
+                var dotPill = Rectangle.Empty;
+                if (overlay && hover == RowHover.Status && Switchable(row)) {
+                    int want = TextRenderer.MeasureText(g, SwitchAction(row), small).Width + (int)(10 * scale);
+                    int left = Math.Max(status.Left - want, key.Right + (int)(6 * scale));
+                    dotPill = Rectangle.FromLTRB(Math.Min(left, status.Left), status.Top, status.Right, status.Bottom);
+                    zones.Status = dotPill;
+                }
                 if (hover == RowHover.Target) Theme.Fill(g, zones.Target, p.Hover, (int)(Theme.SmallRadius * scale));
                 Image image = row.Rule == null ? null : AppIcons.Get(row.Rule, iconSize);
                 if (image != null) Dpi.DrawIcon(g, image, iconRect); else {
                     Theme.Fill(g, iconRect, p.SecondaryButtonBackground, (int)(8 * scale));
                     TextRenderer.DrawText(g, string.IsNullOrEmpty(row.Name) ? "W" : row.Name.Substring(0, 1).ToUpperInvariant(), font, iconRect, p.SecondaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 }
-                if (hover == RowHover.Status && Switchable(row)) {
+                if (overlay) {
+                    if (!dotPill.IsEmpty) {
+                        Theme.Fill(g, dotPill, p.Hover, pillH / 2);
+                        TextRenderer.DrawText(g, SwitchAction(row), small, Rectangle.FromLTRB(dotPill.Left + (int)(4 * scale), dotPill.Top, status.Left + (int)(4 * scale), dotPill.Bottom), p.PrimaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                    }
+                    DrawDot(g, status, state, scale);
+                } else if (hover == RowHover.Status && Switchable(row)) {
                     // Same pill, same width: it just names the action a click takes.
                     Theme.Fill(g, status, p.Pressed, pillH / 2);
                     TextRenderer.DrawText(g, SwitchAction(row), small, status, p.PrimaryText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
@@ -271,7 +305,8 @@ namespace WindowSwitch {
         public int RowHeight { get { return (int)((Overlay ? 56 : 58) * DeviceDpi / 96f); } }
         public bool Scrollable { get { return Rows.Count * RowHeight > ClientSize.Height; } }
         int MaximumOffset { get { return Math.Max(0, Rows.Count * RowHeight - ClientSize.Height); } }
-        public AppList() { DoubleBuffered = true; AutoScroll = false; Dock = DockStyle.Fill; TabStop = true; BackColor = Theme.Current.Surface; AppIcons.Changed += IconsChanged; }
+        // Pills and badges are right-aligned: the whole list repaints when its width changes.
+        public AppList() { DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw, true); AutoScroll = false; Dock = DockStyle.Fill; TabStop = true; BackColor = Theme.Current.Surface; AppIcons.Changed += IconsChanged; }
         void IconsChanged(object sender, EventArgs e) { if (IsHandleCreated && !IsDisposed) try { BeginInvoke(new Action(Invalidate)); } catch (InvalidOperationException) { } }
         public void SetRows(List<HintRow> rows) { Rows = rows; selected = Math.Min(selected, rows.Count - 1); if (highlight >= rows.Count) highlight = -1; offset = Math.Min(offset, MaximumOffset); Invalidate(); }
         protected override void OnResize(EventArgs e) { base.OnResize(e); offset = Math.Min(offset, MaximumOffset); }

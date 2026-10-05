@@ -9,10 +9,11 @@ namespace WindowSwitch {
     public sealed partial class MainForm {
         // The hold-preview summary (长按 Left Alt · 0.3 秒), boxed like the shortcut fields; clicking it opens the settings.
         readonly ValueField hintCaption = new ValueField { AccessibleName = "快捷键预览" };
-        GlobalShortcutSetting openApp, minimizeSetting;
+        GlobalShortcutSetting openApp, minimizeSetting, moveScreenSetting;
         readonly SegmentedControl themeChoice = new SegmentedControl();
         readonly Toggle trayToggle = new Toggle { AccessibleName = "显示托盘图标" };
         readonly Toggle screenToggle = new Toggle { AccessibleName = "随鼠标换屏" };
+        readonly Toggle doubleTapToggle = new Toggle { AccessibleName = "连续双击放大" };
         // Esc right after a switch puts the window away again; how long that chance lasts (0 = off).
         readonly SegmentedControl undoChoice = new SegmentedControl { AccessibleName = "Esc 撤销切换" };
         static readonly int[] undoPresets = { 0, 500, 1000 };
@@ -73,7 +74,9 @@ namespace WindowSwitch {
             keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); keys.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); keys.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             openApp = new GlobalShortcutSetting(this, "打开窗口快捷键", x => x.OpenApp, (x, value) => x.OpenApp = value, () => hotkeys.OpenAppState, null);
             minimizeSetting = new GlobalShortcutSetting(this, "最小化当前窗口", x => x.Minimize, (x, value) => x.Minimize = value, () => hotkeys.MinimizeState, null);
-            foreach (var setting in new[] { openApp, minimizeSetting }) {
+            moveScreenSetting = new GlobalShortcutSetting(this, "快速切屏", x => x.MoveScreen, (x, value) => x.MoveScreen = value, () => hotkeys.MoveScreenState, null);
+            InfoTip.Attach(moveScreenSetting.Title, "按下快捷键，将当前窗口移至鼠标所在的显示器。");
+            foreach (var setting in new[] { openApp, minimizeSetting, moveScreenSetting }) {
                 setting.Recorder.Dock = DockStyle.Fill;
                 KeyRow(keys, setting.Title, setting.Recorder, setting.ActionButton);
                 // Problems (taken, cannot listen) show under the field; otherwise the row stays compact.
@@ -82,7 +85,12 @@ namespace WindowSwitch {
             }
             hintCaption.Dock = DockStyle.Fill; hintCaption.Click += delegate { SetHintOptions(); };
             Button customize = Ui.Button("设置"); customize.Click += delegate { SetHintOptions(); };
-            KeyRow(keys, Ui.Label("快捷键预览"), hintCaption, customize);
+            var previewName = Ui.Label("快捷键预览"); KeyRow(keys, previewName, hintCaption, customize);
+            InfoTip.Attach(previewName, "长按查看键，显示所有应用及其快捷键。");
+            // A quick double press of an app's shortcut maximizes (or restores) its window.
+            doubleTapToggle.Checked = settings.DoubleTapMaximize; doubleTapToggle.CheckedChanged += delegate { if (!refreshing) ChangeDoubleTap(doubleTapToggle.Checked); };
+            var doubleTapName = Ui.Label("连续双击放大"); KeyRow(keys, doubleTapName, new Panel { BackColor = Color.Transparent }, doubleTapToggle);
+            InfoTip.Attach(doubleTapName, "快速按两次应用快捷键，将窗口最大化；再按两次恢复原大小。");
             keys.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); keys.RowCount++; // as below: rows stay at the top
             grid.Controls.Add(keys, 0, 0);
             var prefs = Ui.Table(); prefs.Margin = new Padding(12, 0, 0, 0);
@@ -93,9 +101,9 @@ namespace WindowSwitch {
             // A preset applies at once; 自定义 (or clicking it again) opens a small field for any duration.
             undoChoice.SelectedIndexChanged += delegate { if (refreshing) return; if (undoChoice.SelectedIndex < undoPresets.Length) ChangeUndo(undoPresets[undoChoice.SelectedIndex]); else AskUndo(); };
             undoChoice.MouseUp += delegate { if (!refreshing && undoChoice.SelectedIndex == undoPresets.Length && undoPopup == null) AskUndo(); };
-            Ui.Row(prefs, SettingsPair("Esc 撤销切换", undoChoice));
+            Ui.Row(prefs, SettingsPair("Esc 撤销切换", undoChoice, "切换应用后，在设定时间内按 Esc，可将刚打开的窗口最小化。"));
             screenToggle.Checked = settings.FollowPointerScreen; screenToggle.CheckedChanged += delegate { if (!refreshing) ChangeFollowScreen(screenToggle.Checked); };
-            Ui.Row(prefs, SettingsPair("随鼠标换屏", screenToggle));
+            Ui.Row(prefs, SettingsPair("随鼠标换屏", screenToggle, "切换应用时，将窗口移至鼠标所在的显示器。\n可在「编辑应用」中单独设置。"));
             Ui.Row(prefs, SettingsPair("随 Windows 登录启动", startup));
             startup.Checked = IsStartupEnabled(); startup.CheckedChanged += delegate { if (!refreshing) ChangeStartup(startup.Checked); };
             var trayPair = SettingsPair("显示托盘图标", trayToggle); trayPair.Margin = Padding.Empty; Ui.Row(prefs, trayPair);
@@ -115,10 +123,12 @@ namespace WindowSwitch {
             content.Margin = new Padding(0, 0, 8, 12); trailing.Margin = new Padding(0, 0, 0, 12); trailing.Anchor = AnchorStyles.Right;
             table.Controls.Add(label, 0, at); table.Controls.Add(content, 1, at); table.Controls.Add(trailing, 2, at);
         }
-        static Control SettingsPair(string caption, Control control) {
+        // tip: a short explanation shown when the pointer rests on the caption (optional).
+        static Control SettingsPair(string caption, Control control, string tip = null) {
             var table = Ui.Table(2); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, Dpi.FieldHeight)); table.RowCount = 1; table.Margin = new Padding(0, 0, 0, 12);
             var label = Ui.Label(caption); label.TextAlign = ContentAlignment.MiddleLeft; label.Margin = Padding.Empty; table.Controls.Add(label, 0, 0);
+            if (tip != null) { label.Anchor = AnchorStyles.Left; InfoTip.Attach(label, tip); }
             control.Anchor = AnchorStyles.Right; control.Margin = Padding.Empty; table.Controls.Add(control, 1, 0); return table;
         }
         static Button AddButton(FlowLayoutPanel panel, string text, bool primary, EventHandler action) { var button = Ui.Button(text, primary); button.Click += action; panel.Controls.Add(button); return button; }
@@ -128,6 +138,7 @@ namespace WindowSwitch {
             if (SaveSettings(proposed)) tray.Visible = show;
             refreshing = true; trayToggle.Checked = settings.ShowTrayIcon; refreshing = false;
         }
+        void ChangeDoubleTap(bool on) { var proposed = CopySettings(); proposed.DoubleTapMaximize = on; SaveSettings(proposed); refreshing = true; doubleTapToggle.Checked = settings.DoubleTapMaximize; refreshing = false; }
         void ChangeFollowScreen(bool on) { var proposed = CopySettings(); proposed.FollowPointerScreen = on; SaveSettings(proposed); refreshing = true; screenToggle.Checked = settings.FollowPointerScreen; refreshing = false; }
         void ChangeUndo(int ms) { var proposed = CopySettings(); proposed.UndoMs = ms; SaveSettings(proposed); ShowUndo(); }
         void ChangeTheme(ThemeMode mode) { var proposed = CopySettings(); proposed.Theme = mode; if (SaveSettings(proposed)) Theme.Set(mode); refreshing = true; themeChoice.SelectedIndex = (int)settings.Theme; refreshing = false; }
@@ -242,8 +253,9 @@ namespace WindowSwitch {
                 return false;
             }
         }
-        // One of Window Switch's own shortcuts, edited as a draft: while the field is active, 停用 becomes 保存 and
+        // One of Window Switch's own shortcuts, edited as a draft: while the field is active, the button becomes 保存 and
         // nothing changes until 保存 is clicked. Clicking anywhere else, Esc, or leaving the window restores it.
+        // Otherwise the button is 停用 / 启用: disabling keeps the key (shown greyed out), so 启用 brings it back.
         sealed class GlobalShortcutSetting {
             readonly MainForm form; readonly Func<Settings, GlobalShortcut> read; readonly Action<Settings, GlobalShortcut> write; readonly Func<string> state; readonly string idleHint;
             public readonly ShortcutRecorder Recorder = new ShortcutRecorder();
@@ -266,7 +278,7 @@ namespace WindowSwitch {
                 // Clicks on labels, cards or empty space do not move keyboard focus, so Leave alone never fires for them.
                 clicks = new ClickWatcher(delegate(IntPtr target) { if (draft && target != Recorder.Handle && target != action.Handle) form.BeginInvoke(new Action(End)); });
                 form.Deactivate += delegate { if (draft) End(); };
-                action.Click += delegate { if (draft) Save(); else Disable(); };
+                action.Click += delegate { if (draft) Save(); else if (Saved.Enabled) Disable(); else Enable(); };
             }
             GlobalShortcut Saved { get { return read(form.settings); } }
             void Begin() {
@@ -277,7 +289,7 @@ namespace WindowSwitch {
             }
             void End() {
                 if (!draft) return;
-                draft = false; action.Text = "停用"; action.Primary = false; action.Invalidate(); clicks.Stop();
+                draft = false; action.Primary = false; action.Invalidate(); clicks.Stop();
                 if (Recorder.Focused || action.Focused || form.ActiveControl == Recorder || form.ActiveControl == action) ParkFocus();
                 form.editing = false; form.hints.Suspend(false); form.RegisterRules();
                 Refresh(true);
@@ -301,17 +313,30 @@ namespace WindowSwitch {
                 var proposed = form.CopySettings(); write(proposed, new GlobalShortcut { Enabled = false, Modifiers = saved.Modifiers, VirtualKey = saved.VirtualKey, Sides = saved.Sides });
                 if (form.SaveSettings(proposed)) Refresh(true);
             }
+            // The kept key goes back on, after the same checks as saving a new one (conflicts, taken by another program).
+            void Enable() {
+                var saved = Saved; if (saved.Enabled || !saved.HasKey) return;
+                try {
+                    var proposed = form.CopySettings(); write(proposed, new GlobalShortcut { Enabled = true, Modifiers = saved.Modifiers, VirtualKey = saved.VirtualKey, Sides = saved.Sides });
+                    HotkeyManager.Validate(proposed);
+                    string error = form.hotkeys.Probe(new KeyChord { Modifiers = saved.Modifiers, Key = saved.VirtualKey, Sides = saved.Sides }); if (error != null) throw new ArgumentException(error);
+                    if (!form.SaveSettings(proposed)) throw new ArgumentException(form.note.Text);
+                    Refresh(true);
+                } catch (Exception ex) { Caption.Text = ex.Message; }
+            }
             // Shows the saved shortcut and its state; left alone while it is being edited.
             public void Refresh(bool force = false) {
                 if (draft || (Recorder.Focused && !force)) return;
-                var saved = Saved; Recorder.Text = saved.Enabled ? saved.Display : "未设置";
-                if (!saved.Enabled && action.Focused) ParkFocus(); // e.g. right after clicking 停用
-                action.Enabled = saved.Enabled;
+                var saved = Saved; Recorder.Text = saved.HasKey ? saved.Display : "未设置"; Recorder.Dim = !saved.Enabled;
+                // 停用 for a working key, 启用 for a kept one; nothing to do for a key that was never set.
+                bool canAct = saved.Enabled || saved.HasKey;
+                if (!canAct && action.Focused) ParkFocus(); // a disabled button would hand focus to the next shortcut field
+                action.Enabled = canAct; action.Text = saved.Enabled || !saved.HasKey ? "停用" : "启用"; action.Invalidate();
                 string current = state();
                 Caption.Text = !saved.Enabled || current == "已生效" ? (idleHint ?? "") : current;
             }
         }
-        void RefreshGlobalShortcuts() { if (openApp != null) openApp.Refresh(); if (minimizeSetting != null) minimizeSetting.Refresh(); }
+        void RefreshGlobalShortcuts() { if (openApp != null) openApp.Refresh(); if (minimizeSetting != null) minimizeSetting.Refresh(); if (moveScreenSetting != null) moveScreenSetting.Refresh(); }
         void UpdateHintCaption() {
             bool on = settings.Hint.Enabled; hintCaption.Text = on ? "长按" : "长按查看已关闭";
             hintCaption.Key = on ? Ui.KeyName(settings.Hint.Key) : ""; hintCaption.Suffix = on ? "· " + (settings.Hint.DelayMs / 1000.0).ToString("0.##") + " 秒" : "";

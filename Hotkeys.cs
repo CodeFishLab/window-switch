@@ -11,9 +11,14 @@ namespace WindowSwitch {
         public uint Sides { get; set; }
         public GlobalShortcut() { Enabled = true; Modifiers = 3; VirtualKey = 77; }
         public string Display { get { return KeyChord.Display(Modifiers, VirtualKey, Sides); } }
+        // 停用 keeps the key (so 启用 brings it back); a shortcut that was never set has none.
+        [System.Web.Script.Serialization.ScriptIgnore] public bool HasKey { get { return VirtualKey != 0; } }
+        public static GlobalShortcut Unset() { return new GlobalShortcut { Enabled = false, Modifiers = 0, VirtualKey = 0 }; }
+        // Older configs stored never-set shortcuts as a disabled Ctrl+Alt+M placeholder: treat that as "no key".
+        public void ForgetPlaceholder() { if (!Enabled && Sides == 0 && Modifiers == 3 && VirtualKey == 77) { Modifiers = 0; VirtualKey = 0; } }
     }
     public sealed class HotkeyManager : IDisposable {
-        public const int MinimizeId = 20, OpenAppId = 21, MaxShortcuts = 5;
+        public const int MinimizeId = 20, OpenAppId = 21, MoveScreenId = 22, MaxShortcuts = 5;
         // Hotkey id for the n-th shortcut of the app at index.
         static int Id(int index, int shortcut) { return 100 + index * 10 + shortcut; }
         readonly IntPtr handle;
@@ -21,6 +26,7 @@ namespace WindowSwitch {
         readonly Dictionary<AppRule, string> states = new Dictionary<AppRule, string>();
         public string MinimizeState { get; private set; }
         public string OpenAppState { get; private set; }
+        public string MoveScreenState { get; private set; }
         public int AppCount { get { return registered.Count; } }
         readonly SidedHotkeys sided;
         public bool Navigating { set { sided.Navigating = value; } }
@@ -28,7 +34,7 @@ namespace WindowSwitch {
         public HotkeyManager(IntPtr hwnd) { handle = hwnd; sided = new SidedHotkeys(hwnd); }
         public AppRule Rule(int id) { AppRule rule; return registered.TryGetValue(id, out rule) ? rule : null; }
         public string State(AppRule rule) { string value; return states.TryGetValue(rule, out value) ? value : "未注册"; }
-        public void Clear() { foreach (int id in registered.Keys) Native.UnregisterHotKey(handle, id); registered.Clear(); Native.UnregisterHotKey(handle, MinimizeId); Native.UnregisterHotKey(handle, OpenAppId); sided.Set(new SidedHotkeys.Binding[0]); sided.NumberHoldKey = 0; }
+        public void Clear() { foreach (int id in registered.Keys) Native.UnregisterHotKey(handle, id); registered.Clear(); Native.UnregisterHotKey(handle, MinimizeId); Native.UnregisterHotKey(handle, OpenAppId); Native.UnregisterHotKey(handle, MoveScreenId); sided.Set(new SidedHotkeys.Binding[0]); sided.NumberHoldKey = 0; }
         public void Apply(Settings settings, bool paused) {
             Clear(); states.Clear(); var hooked = new List<SidedHotkeys.Binding>();
             for (int i = 0; i < settings.Applications.Count; i++) {
@@ -46,9 +52,10 @@ namespace WindowSwitch {
             var hint = settings.Hint; sided.NumberHoldKey = !paused && hint != null && hint.Enabled && hint.NumberKeys ? hint.Key : 0;
             MinimizeState = RegisterGlobal(settings.Minimize, MinimizeId, hooked, paused);
             OpenAppState = RegisterGlobal(settings.OpenApp, OpenAppId, hooked, paused);
+            MoveScreenState = RegisterGlobal(settings.MoveScreen, MoveScreenId, hooked, paused);
             sided.Set(hooked);
         }
-        // Window Switch's own shortcuts (最小化当前窗口, 打开窗口快捷键).
+        // Window Switch's own shortcuts (最小化当前窗口, 打开窗口快捷键, 快速切屏).
         string RegisterGlobal(GlobalShortcut shortcut, int id, List<SidedHotkeys.Binding> hooked, bool paused) {
             if (paused) return "已暂停";
             if (shortcut == null || !shortcut.Enabled) return "已停用";
@@ -70,6 +77,8 @@ namespace WindowSwitch {
             if (settings.Minimize.Enabled && MinimizeState != "已生效" && settings.Minimize.Sides == 0 && Native.RegisterHotKey(handle, MinimizeId, settings.Minimize.Modifiers | 0x4000, settings.Minimize.VirtualKey)) { MinimizeState = "已生效"; changed = true; }
             var open = settings.OpenApp;
             if (open != null && open.Enabled && OpenAppState != "已生效" && open.Sides == 0 && Native.RegisterHotKey(handle, OpenAppId, open.Modifiers | 0x4000, open.VirtualKey)) { OpenAppState = "已生效"; changed = true; }
+            var move = settings.MoveScreen;
+            if (move != null && move.Enabled && MoveScreenState != "已生效" && move.Sides == 0 && Native.RegisterHotKey(handle, MoveScreenId, move.Modifiers | 0x4000, move.VirtualKey)) { MoveScreenState = "已生效"; changed = true; }
             return changed;
         }
         // Called while editing has suspended this tool's bindings. A failed proposal leaves the saved binding intact.
@@ -81,10 +90,15 @@ namespace WindowSwitch {
         public static void Validate(Settings settings) {
             MainForm.Validate(settings.Applications);
             if (settings.Minimize == null) settings.Minimize = new GlobalShortcut();
-            if (settings.OpenApp == null) settings.OpenApp = new GlobalShortcut { Enabled = false };
+            if (settings.OpenApp == null) settings.OpenApp = GlobalShortcut.Unset();
+            if (settings.MoveScreen == null) settings.MoveScreen = GlobalShortcut.Unset();
             if (!Enum.IsDefined(typeof(ThemeMode), settings.Theme)) throw new ArgumentException("主题设置无效。");
-            string minimizeId = CheckGlobal(settings, settings.Minimize, "最小化当前窗口"), openId = CheckGlobal(settings, settings.OpenApp, "打开窗口快捷键");
-            if (minimizeId != null && minimizeId == openId) throw new ArgumentException("“打开窗口快捷键”和“最小化当前窗口”不能使用同一个快捷键。");
+            // Window Switch's own shortcuts must differ from the apps' and from each other.
+            var own = new[] { new { What = "打开窗口快捷键", Id = CheckGlobal(settings, settings.OpenApp, "打开窗口快捷键") },
+                              new { What = "最小化当前窗口", Id = CheckGlobal(settings, settings.Minimize, "最小化当前窗口") },
+                              new { What = "快速切屏", Id = CheckGlobal(settings, settings.MoveScreen, "快速切屏") } };
+            for (int i = 0; i < own.Length; i++) for (int j = i + 1; j < own.Length; j++)
+                if (own[i].Id != null && own[i].Id == own[j].Id) throw new ArgumentException("“" + own[i].What + "”和“" + own[j].What + "”不能使用同一个快捷键。");
         }
         // Validates one of Window Switch's own shortcuts; returns its identity, or null when disabled.
         static string CheckGlobal(Settings settings, GlobalShortcut shortcut, string what) {
