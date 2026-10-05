@@ -14,7 +14,7 @@ namespace WindowSwitch {
         public Color WarningBackground, WarningForeground, Selection;
         // Scheme A additions: muted text is a real color (never opacity), focus is graphite (never Windows blue),
         // and green is reserved for the dark-mode status dot.
-        public Color MutedText, Focus, PrimaryButtonHover, ToggleOn, ToggleOff, ToggleKnob, ToggleKnobOn, PopoverBackground, StatusDot, DangerForeground, DangerBackground;
+        public Color MutedText, Focus, PrimaryButtonHover, ToggleOn, ToggleOff, ToggleKnob, ToggleKnobOn, PopoverBackground, StatusDot, ConflictDot, DangerForeground, DangerBackground;
         public bool Dark;
     }
     public static class Theme {
@@ -39,12 +39,12 @@ namespace WindowSwitch {
                 // Near-black, like Claude's dark surfaces; cards and controls step up in small neutral increments.
                 Dark = true, AppBackground = C(0x141413), Surface = C(0x1D1D1C), ElevatedSurface = C(0x252524), PrimaryText = C(0xF2F0EC), SecondaryText = C(0xA8A6A1), MutedText = C(0x7C7A76), DisabledText = C(0x5E5D5A), Border = C(0x30302E), Divider = C(0x282827),
                 PrimaryButtonBackground = C(0xF2F0EC), PrimaryButtonForeground = C(0x141413), PrimaryButtonHover = C(0xDCDAD5), SecondaryButtonBackground = C(0x252524), Hover = C(0x2C2C2A), Pressed = C(0x343432), Selection = C(0x2E2E2C),
-                SuccessBackground = C(0x252524), SuccessForeground = C(0xD6D4CF), StatusDot = C(0x6DBE7B), ShortcutBadgeBackground = C(0x252524), ShortcutBadgeForeground = C(0xD6D4CF), OverlayBackground = C(0x1D1D1C), OverlayBorder = C(0x2A2A28), WarningBackground = C(0x3A3229), WarningForeground = C(0xE2C595),
+                SuccessBackground = C(0x252524), SuccessForeground = C(0xD6D4CF), StatusDot = C(0x6DBE7B), ConflictDot = C(0xE5867A), ShortcutBadgeBackground = C(0x252524), ShortcutBadgeForeground = C(0xD6D4CF), OverlayBackground = C(0x1D1D1C), OverlayBorder = C(0x2A2A28), WarningBackground = C(0x3A3229), WarningForeground = C(0xE2C595),
                 Focus = C(0x9C9A95), ToggleOn = C(0xEAE8E3), ToggleOff = C(0x3A3A38), ToggleKnob = C(0xF2F0EC), ToggleKnobOn = C(0x141413), PopoverBackground = C(0x232322), DangerForeground = C(0xEC8E80), DangerBackground = C(0x3B2421)
             } : new ThemePalette {
                 AppBackground = C(0xF6F3ED), Surface = C(0xFCFBF8), ElevatedSurface = C(0xFFFFFF), PrimaryText = C(0x252422), SecondaryText = C(0x78766F), MutedText = C(0x9C9A95), DisabledText = C(0xB6B4AF), Border = C(0xE4E1DA), Divider = C(0xE9E6E0),
                 PrimaryButtonBackground = C(0x272624), PrimaryButtonForeground = C(0xFAF9F6), PrimaryButtonHover = C(0x3D3B38), SecondaryButtonBackground = C(0xEFEEE9), Hover = C(0xE9E7E1), Pressed = C(0xE1DFD8), Selection = C(0xE6E4DE),
-                SuccessBackground = C(0xEFEEE9), SuccessForeground = C(0x78766F), StatusDot = C(0x46A660), ShortcutBadgeBackground = C(0xEFEEE9), ShortcutBadgeForeground = C(0x4C4A46), OverlayBackground = C(0xFBFAF7), OverlayBorder = C(0xE7E4DE), WarningBackground = C(0xF4EADA), WarningForeground = C(0x95703C),
+                SuccessBackground = C(0xEFEEE9), SuccessForeground = C(0x78766F), StatusDot = C(0x46A660), ConflictDot = C(0xDE7B6E), ShortcutBadgeBackground = C(0xEFEEE9), ShortcutBadgeForeground = C(0x4C4A46), OverlayBackground = C(0xFBFAF7), OverlayBorder = C(0xE7E4DE), WarningBackground = C(0xF4EADA), WarningForeground = C(0x95703C),
                 Focus = C(0x6F6D69), ToggleOn = C(0x272624), ToggleOff = C(0xDCD9D2), ToggleKnob = C(0xFFFFFF), ToggleKnobOn = C(0xFFFFFF), PopoverBackground = C(0xFFFFFF), DangerForeground = C(0xB4473A), DangerBackground = C(0xF6E4E0)
             };
             if (Changed != null) Changed(null, EventArgs.Empty);

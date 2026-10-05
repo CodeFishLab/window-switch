@@ -177,7 +177,7 @@ namespace WindowSwitch {
             return Math.Max(left + keys + right, 2 * Math.Max(left, right) + keys);
         }
         // The preview marks each app's state with a dot in a narrow cell at the right edge, mirroring the number column
-        // on the left: green = on, hollow ring = switched off, amber = conflict, grey = paused. The main list keeps the
+        // on the left: green = on, hollow ring = switched off, light red = conflict, grey = paused. The main list keeps the
         // labelled pill.
         const int OverlayDotCell = 26;
         static int OverlayDot(Font font, float scale) { return (int)(OverlayDotCell * scale); }
@@ -186,7 +186,7 @@ namespace WindowSwitch {
             var p = Theme.Current; int d = (int)((state == "已停用" ? 6 : 5) * scale);
             var r = new Rectangle(cell.Left + (cell.Width - d) / 2, cell.Top + (cell.Height - d) / 2, d, d);
             if (state == "已停用") { float w = Math.Max(1f, 1.1f * scale); using (var pen = new Pen(p.MutedText, w)) g.DrawEllipse(pen, r.X + w / 2, r.Y + w / 2, r.Width - w, r.Height - w); return; }
-            using (var b = new SolidBrush(state == "已生效" ? p.StatusDot : state == "有冲突" ? p.WarningForeground : p.MutedText)) g.FillEllipse(b, r);
+            using (var b = new SolidBrush(state == "已生效" ? p.StatusDot : state == "有冲突" ? p.ConflictDot : p.MutedText)) g.FillEllipse(b, r);
         }
         public static RowZones Draw(Graphics g, Rectangle bounds, HintRow row, Font font, float scale, bool overlay, RowHover hover, int nameColumn = 0, bool numbered = false, bool highlighted = false) {
             var p = Theme.Current; g.SmoothingMode = SmoothingMode.AntiAlias; var zones = new RowZones();
