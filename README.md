@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -OutputDirectory out  # 输�
 
 运行 `WindowSwitch.exe`。`WindowSwitch.exe.config` 必须和 exe 放在同一目录（开启 Per-Monitor V2 高 DPI，否则界面会模糊）。
 
-首次运行会在 exe 旁生成 `config.json`（个人配置，已在 `.gitignore` 中排除）。
+首次运行会在 exe 旁生成 `config.json`。
 
 命令行参数：
 
