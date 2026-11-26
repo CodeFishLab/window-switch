@@ -1,6 +1,8 @@
 # 窗口切换 · Window Switch
 
 给常用应用绑定全局快捷键：按一下打开或切到前台，再按一下最小化。Windows 桌面工具，WinForms / .NET Framework 4.8。
+![Uploading p11-26_03-13-19.png…]()
+![Uploading p11-26_03-11-57.png…]()
 
 ## 功能
 
