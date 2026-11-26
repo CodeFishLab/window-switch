@@ -1,8 +1,8 @@
 # 窗口切换 · Window Switch
 
 给常用应用绑定全局快捷键：按一下打开或切到前台，再按一下最小化。Windows 桌面工具，WinForms / .NET Framework 4.8。
-![Uploading p11-26_03-13-19.png…]()
-![Uploading p11-26_03-11-57.png…]()
+<img width="1608" height="797" alt="p11-26_03-13-19" src="https://github.com/user-attachments/assets/3d36d499-e7f3-4dc8-83bf-dfc1a9d7b1d4" />
+<img width="1684" height="1209" alt="p11-26_03-11-57" src="https://github.com/user-attachments/assets/d78aae97-278f-4f03-bc99-4e78073413f5" />
 
 ## 功能
 
@@ -14,8 +14,6 @@
 - **随鼠标换屏**：切换时把应用窗口移到鼠标所在的屏幕（总开关 + 每个应用可设为总是 / 从不）。
 - **连续双击放大**：快速双击应用快捷键把窗口最大化，再双击还原；每个应用可选再次按下时「最小化」或「关闭窗口」。
 - 编辑面板保存后保持打开，可连续编辑多个应用（切换时自动保存）；拖动排序应用与快捷键；亮色 / 暗色 / 跟随系统；托盘常驻（可关闭托盘图标）、随 Windows 登录启动。
-
-版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 构建
 
